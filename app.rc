@@ -1,0 +1,5 @@
+/* app.rc - 资源文件：嵌入 manifest，使 Windows 启用 Visual Styles 主题渲染 */
+#include <windows.h>
+
+/* RT_MANIFEST = 24，ID=1 表示应用程序 manifest */
+1 RT_MANIFEST "app.manifest"
