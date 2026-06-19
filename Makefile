@@ -4,7 +4,7 @@
 CC      = x86_64-w64-mingw32-gcc
 WINDRES = x86_64-w64-mingw32-windres
 TARGET  = yst_unlock.exe
-SRC     = main.c
+SRC     = main.c decrypt.c gui.c
 RES     = app.res
 
 # -Os 优化体积，-s 去除符号，-mwindows 隐藏控制台

@@ -1,41 +1,42 @@
-# build.ps1
-# Nuitka one-file build for main.py
-# Run from project root:  .\build.ps1
+# build.ps1  -  MinGW C 版（三文件：main.c + decrypt.c + gui.c）
+# 需要安装：mingw-w64 (x86_64-w64-mingw32-gcc)
+# Run from project root（WSL）：
+#   x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE -mwindows -Wall \
+#     -Wno-unused-parameter -std=c11 \
+#     -o yst_unlock.exe main.c decrypt.c gui.c app.res \
+#     -lshlwapi -lshell32 -lcomctl32 -lcomdlg32 -lole32
+#
+# 或在 Windows PowerShell 中使用本脚本（需 PATH 中有 MinGW）：
+#   .\build.ps1
 
 $ErrorActionPreference = "Stop"
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$OutName   = "yst_unlock.exe"
+$OutPath   = Join-Path $ScriptDir $OutName
 
-$ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
-$SourceFile = Join-Path $ScriptDir "main.py"
-$OutDir     = Join-Path $ScriptDir "dist"
-
-if (-not (Test-Path $OutDir)) {
-    New-Item -ItemType Directory -Path $OutDir | Out-Null
+$Sources = @("main.c", "decrypt.c", "gui.c", "app.res") | ForEach-Object {
+    Join-Path $ScriptDir $_
 }
 
-Write-Host ">>> Nuitka build starting..." -ForegroundColor Cyan
-Write-Host "    Source : $SourceFile"
-Write-Host "    Output : $OutDir"
-Write-Host ""
+$Libs = "-lshlwapi", "-lshell32", "-lcomctl32", "-lcomdlg32", "-lole32"
 
-python -m nuitka `
-    --onefile `
-    --windows-console-mode=disable `
-    --output-filename=YSTUnlock.exe `
-    --output-dir="$OutDir" `
-    --enable-plugin=tk-inter `
-    --assume-yes-for-downloads `
-    --jobs=4 `
-    "$SourceFile"
+Write-Host ">>> MinGW build starting..." -ForegroundColor Cyan
+
+$Args = @(
+    "-Os", "-s",
+    "-DUNICODE", "-D_UNICODE",
+    "-mwindows",
+    "-Wall", "-Wno-unused-parameter",
+    "-std=c11",
+    "-o", $OutPath
+) + $Sources + $Libs
+
+& x86_64-w64-mingw32-gcc @Args
 
 if ($LASTEXITCODE -eq 0) {
-    $exe  = Join-Path $OutDir "YSTUnlock.exe"
-    $size = [math]::Round((Get-Item $exe).Length / 1MB, 1)
-    Write-Host ""
-    Write-Host ">>> Build succeeded!" -ForegroundColor Green
-    Write-Host "    File : $exe"
-    Write-Host "    Size : ${size} MB"
+    $size = [math]::Round((Get-Item $OutPath).Length / 1KB, 0)
+    Write-Host ">>> Build succeeded!  $OutPath  (${size} KB)" -ForegroundColor Green
 } else {
-    Write-Host ""
     Write-Host ">>> Build FAILED." -ForegroundColor Red
     exit 1
 }
