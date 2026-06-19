@@ -26,6 +26,7 @@ _IS_PACKED = getattr(sys, "frozen", False) or globals().get("__compiled__", Fals
 
 # ── 注册表查询：扩展名 -> 默认打开程序进程名 ────────────────────────────────
 
+
 def get_default_process_for_ext(ext: str) -> str | None:
     """
     查 Windows 注册表，返回指定扩展名的默认打开程序进程名（如 WINWORD.EXE）。
@@ -148,6 +149,7 @@ def uninstall_context_menu() -> str:
 
 # ── Worker 子进程：以伪装进程名身份复制文件 ─────────────────────────────────
 
+
 def worker_copy_file():
     """
     长连接 worker 模式：从 stdin 循环读取任务，每行格式为 `src\tdst`。
@@ -155,7 +157,7 @@ def worker_copy_file():
     以当前进程名（即伪装的白名单进程名）身份运行，YST 看到的是合法进程。
     """
     # 切换 stdin/stdout 为二进制行模式，避免编码问题
-    stdin  = open(sys.stdin.fileno(),  "rb", buffering=0)
+    stdin = open(sys.stdin.fileno(), "rb", buffering=0)
     stdout = open(sys.stdout.fileno(), "wb", buffering=0)
     for raw in stdin:
         line = raw.rstrip(b"\n").rstrip(b"\r")
@@ -179,16 +181,31 @@ def worker_copy_file():
 
 # 跳过的目录名（精确匹配，大小写不敏感）
 _SKIP_DIRS = {
-    ".git", ".svn", ".hg", ".idea", ".vscode",
-    "__pycache__", "node_modules", ".cache",
-    "$recycle.bin", "system volume information",
-    "windows", "program files", "program files (x86)",
+    ".git",
+    ".svn",
+    ".hg",
+    ".idea",
+    ".vscode",
+    "__pycache__",
+    "node_modules",
+    ".cache",
+    "$recycle.bin",
+    "system volume information",
+    "windows",
+    "program files",
+    "program files (x86)",
 }
 
 # 跳过的文件扩展名
 _SKIP_EXTS = {
-    ".lnk", ".tmp", ".temp", ".yst_tmp",
-    ".db", ".DS_Store", ".ini", ".log",
+    ".lnk",
+    ".tmp",
+    ".temp",
+    ".yst_tmp",
+    ".db",
+    ".DS_Store",
+    ".ini",
+    ".log",
 }
 
 
@@ -219,10 +236,7 @@ def collect_files(paths: list[str]) -> list[str]:
         elif os.path.isdir(p):
             for root, dirs, files in os.walk(p):
                 # 就地修改 dirs 以阻止 os.walk 进入被跳过的目录
-                dirs[:] = [
-                    d for d in dirs
-                    if not _should_skip_dir(d)
-                ]
+                dirs[:] = [d for d in dirs if not _should_skip_dir(d)]
                 for fn in files:
                     fp = os.path.join(root, fn)
                     if not _should_skip_file(fp):
@@ -231,6 +245,7 @@ def collect_files(paths: list[str]) -> list[str]:
 
 
 # ── 核心解密逻辑（GUI 和静默模式共用）───────────────────────────────────────
+
 
 def _start_worker_process(fake_exe: str) -> subprocess.Popen:
     """启动一个长连接 worker 子进程，返回 Popen 对象。"""
@@ -266,9 +281,9 @@ def decrypt_files(
     target_paths: list[str],
     proc_override: str | None,
     output_dir: str | None,
-    log_callback,           # fn(str)，静默模式传 None
-    progress_callback,      # fn(float 0-100)，静默模式传 None
-    done_callback,          # fn(bool)
+    log_callback,  # fn(str)，静默模式传 None
+    progress_callback,  # fn(float 0-100)，静默模式传 None
+    done_callback,  # fn(bool)
 ):
     def log(msg):
         if log_callback:
@@ -297,7 +312,11 @@ def decrypt_files(
         common_root = (
             os.path.commonpath(target_paths)
             if len(target_paths) > 1
-            else (target_paths[0] if os.path.isdir(target_paths[0]) else os.path.dirname(target_paths[0]))
+            else (
+                target_paths[0]
+                if os.path.isdir(target_paths[0])
+                else os.path.dirname(target_paths[0])
+            )
         )
 
     try:
@@ -305,14 +324,19 @@ def decrypt_files(
             proc_name = resolve_process_name(src, proc_override)
 
             # 按需启动对应进程名的 worker（首次遇到，或上次崩溃后重启）
-            if proc_name not in worker_procs or worker_procs[proc_name].poll() is not None:
+            if (
+                proc_name not in worker_procs
+                or worker_procs[proc_name].poll() is not None
+            ):
                 fake_exe = os.path.join(tmp_dir, proc_name)
                 try:
                     if not os.path.exists(fake_exe):
                         shutil.copy2(self_exe, fake_exe)
                     worker_procs[proc_name] = _start_worker_process(fake_exe)
                 except Exception as e:
-                    log(f"[{idx}/{total}] 失败 [{proc_name}]: {os.path.basename(src)} — 启动 worker 失败: {e}")
+                    log(
+                        f"[{idx}/{total}] 失败 [{proc_name}]: {os.path.basename(src)} — 启动 worker 失败: {e}"
+                    )
                     fail_count += 1
                     if progress_callback:
                         progress_callback(idx / total * 100)
@@ -342,7 +366,9 @@ def decrypt_files(
                 log(f"[{idx}/{total}] 成功 [{proc_name}]: {os.path.basename(src)}")
             else:
                 fail_count += 1
-                log(f"[{idx}/{total}] 失败 [{proc_name}]: {os.path.basename(src)} — {err}")
+                log(
+                    f"[{idx}/{total}] 失败 [{proc_name}]: {os.path.basename(src)} — {err}"
+                )
 
             if progress_callback:
                 progress_callback(idx / total * 100)
@@ -364,16 +390,18 @@ def decrypt_files(
 
 # ── 进度窗口（右键菜单调用时弹出）──────────────────────────────────────────
 
+
 class ProgressWindow(tk.Tk):
     """
     轻量进度窗口：显示进度条 + 日志，解密完成后自动关闭。
     使用标准 tk.Tk 而非 TkinterDnD，避免引入不必要依赖。
     """
-    _AUTO_CLOSE_MS = 3000   # 完成后 3 秒自动关闭
+
+    _AUTO_CLOSE_MS = 3000  # 完成后 3 秒自动关闭
 
     def __init__(self, paths: list[str]):
         super().__init__()
-        self.title("亿赛通解密")
+        self.title("YST unlock")
         self.resizable(False, False)
         self.geometry("480x240")
         # 居中
@@ -382,8 +410,8 @@ class ProgressWindow(tk.Tk):
         x, y = (sw - 480) // 2, (sh - 240) // 2
         self.geometry(f"480x240+{x}+{y}")
         self._paths = paths
-        self._destroyed = False         # 防止回调操作已销毁的窗口
-        self._auto_close_id = None      # after() 返回的 id，用于取消
+        self._destroyed = False  # 防止回调操作已销毁的窗口
+        self._auto_close_id = None  # after() 返回的 id，用于取消
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -403,14 +431,17 @@ class ProgressWindow(tk.Tk):
         self._progress = ttk.Progressbar(self, mode="determinate", length=440)
         self._progress.pack(**pad)
 
-        self._log_text = tk.Text(self, height=6, state="disabled", wrap="none",
-                                 font=("Consolas", 9))
+        self._log_text = tk.Text(
+            self, height=6, state="disabled", wrap="none", font=("Consolas", 9)
+        )
         sy = ttk.Scrollbar(self, orient="vertical", command=self._log_text.yview)
         self._log_text.configure(yscrollcommand=sy.set)
         sy.pack(side="right", fill="y", padx=(0, 4))
         self._log_text.pack(fill="both", expand=True, padx=(10, 0), pady=4)
 
-        self._btn_close = ttk.Button(self, text="关闭", command=self._on_close, state="disabled")
+        self._btn_close = ttk.Button(
+            self, text="关闭", command=self._on_close, state="disabled"
+        )
         self._btn_close.pack(pady=(0, 8))
 
     def _log(self, msg: str):
@@ -441,8 +472,8 @@ class ProgressWindow(tk.Tk):
             target=decrypt_files,
             args=(
                 self._paths,
-                None,           # proc_override=None：按扩展名自动查
-                None,           # output_dir=None：覆盖原文件
+                None,  # proc_override=None：按扩展名自动查
+                None,  # output_dir=None：覆盖原文件
                 lambda msg: self.after(0, self._log, msg),
                 lambda val: self.after(0, self._set_progress, val),
                 lambda ok: self.after(0, self._on_done, ok),
@@ -454,11 +485,12 @@ class ProgressWindow(tk.Tk):
 def run_with_progress(paths: list[str]):
     """右键菜单调用入口：弹出进度窗口执行解密（自动查进程名 + 覆盖原文件）。"""
     win = ProgressWindow(paths)
-    win.after(100, win.start)   # 窗口渲染后再开始，避免白屏
+    win.after(100, win.start)  # 窗口渲染后再开始，避免白屏
     win.mainloop()
 
 
 # ── GUI ──────────────────────────────────────────────────────────────────────
+
 
 class App(TkinterDnD.Tk):
     def __init__(self, initial_paths: list[str] | None = None):
@@ -476,22 +508,35 @@ class App(TkinterDnD.Tk):
         pad = {"padx": 8, "pady": 4}
 
         # ── 文件选择区 ────────────────────────────────────
-        frame_top = ttk.LabelFrame(self, text="待解密文件 / 文件夹（可拖入）", padding=6)
+        frame_top = ttk.LabelFrame(
+            self, text="待解密文件 / 文件夹（可拖入）", padding=6
+        )
         frame_top.pack(fill="both", expand=True, **pad)
 
         btn_row = ttk.Frame(frame_top)
         btn_row.pack(fill="x")
-        ttk.Button(btn_row, text="添加文件", command=self._add_files).pack(side="left", padx=4)
-        ttk.Button(btn_row, text="添加文件夹", command=self._add_folder).pack(side="left", padx=4)
-        ttk.Button(btn_row, text="清空列表", command=self._clear_list).pack(side="right", padx=4)
+        ttk.Button(btn_row, text="添加文件", command=self._add_files).pack(
+            side="left", padx=4
+        )
+        ttk.Button(btn_row, text="添加文件夹", command=self._add_folder).pack(
+            side="left", padx=4
+        )
+        ttk.Button(btn_row, text="清空列表", command=self._clear_list).pack(
+            side="right", padx=4
+        )
 
         list_frame = ttk.Frame(frame_top)
         list_frame.pack(fill="both", expand=True, pady=4)
 
-        self.listbox = tk.Listbox(list_frame, selectmode="extended", height=8,
-                                  activestyle="none")
-        scroll_y = ttk.Scrollbar(list_frame, orient="vertical", command=self.listbox.yview)
-        scroll_x = ttk.Scrollbar(list_frame, orient="horizontal", command=self.listbox.xview)
+        self.listbox = tk.Listbox(
+            list_frame, selectmode="extended", height=8, activestyle="none"
+        )
+        scroll_y = ttk.Scrollbar(
+            list_frame, orient="vertical", command=self.listbox.yview
+        )
+        scroll_x = ttk.Scrollbar(
+            list_frame, orient="horizontal", command=self.listbox.xview
+        )
         self.listbox.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
         scroll_y.pack(side="right", fill="y")
         scroll_x.pack(side="bottom", fill="x")
@@ -513,22 +558,38 @@ class App(TkinterDnD.Tk):
         # 自动/手动进程名
         self.auto_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
-            frame_cfg, text="推荐设置",
-            variable=self.auto_var, command=self._toggle_auto
+            frame_cfg,
+            text="推荐设置",
+            variable=self.auto_var,
+            command=self._toggle_auto,
         ).grid(row=0, column=0, columnspan=4, sticky="w", padx=4, pady=2)
 
-        ttk.Label(frame_cfg, text="指定进程名:").grid(row=1, column=0, sticky="w", padx=4)
+        ttk.Label(frame_cfg, text="指定进程名:").grid(
+            row=1, column=0, sticky="w", padx=4
+        )
         self.proc_var = tk.StringVar()
-        self.proc_entry = ttk.Entry(frame_cfg, textvariable=self.proc_var, width=22, state="disabled")
+        self.proc_entry = ttk.Entry(
+            frame_cfg, textvariable=self.proc_var, width=22, state="disabled"
+        )
         self.proc_entry.grid(row=1, column=1, sticky="w", padx=4)
-        ttk.Label(frame_cfg, text="（如 EXCEL.EXE）", foreground="gray").grid(row=1, column=2, sticky="w")
+        ttk.Label(frame_cfg, text="（如 EXCEL.EXE）", foreground="gray").grid(
+            row=1, column=2, sticky="w"
+        )
 
         # 输出目录
-        ttk.Label(frame_cfg, text="输出目录:").grid(row=2, column=0, sticky="w", padx=4, pady=4)
+        ttk.Label(frame_cfg, text="输出目录:").grid(
+            row=2, column=0, sticky="w", padx=4, pady=4
+        )
         self.out_var = tk.StringVar()
-        ttk.Entry(frame_cfg, textvariable=self.out_var, width=34).grid(row=2, column=1, columnspan=2, sticky="ew", padx=4)
-        ttk.Button(frame_cfg, text="浏览...", command=self._pick_output).grid(row=2, column=3, padx=4)
-        ttk.Label(frame_cfg, text="留空则覆盖原文件", foreground="gray").grid(row=2, column=4, sticky="w")
+        ttk.Entry(frame_cfg, textvariable=self.out_var, width=34).grid(
+            row=2, column=1, columnspan=2, sticky="ew", padx=4
+        )
+        ttk.Button(frame_cfg, text="浏览...", command=self._pick_output).grid(
+            row=2, column=3, padx=4
+        )
+        ttk.Label(frame_cfg, text="留空则覆盖原文件", foreground="gray").grid(
+            row=2, column=4, sticky="w"
+        )
         frame_cfg.columnconfigure(1, weight=1)
 
         # ── 日志 + 进度 ───────────────────────────────────
@@ -540,7 +601,9 @@ class App(TkinterDnD.Tk):
 
         self.log_text = tk.Text(frame_bot, height=7, state="disabled", wrap="none")
         ls_y = ttk.Scrollbar(frame_bot, orient="vertical", command=self.log_text.yview)
-        ls_x = ttk.Scrollbar(frame_bot, orient="horizontal", command=self.log_text.xview)
+        ls_x = ttk.Scrollbar(
+            frame_bot, orient="horizontal", command=self.log_text.xview
+        )
         self.log_text.configure(yscrollcommand=ls_y.set, xscrollcommand=ls_x.set)
         ls_y.pack(side="right", fill="y")
         ls_x.pack(side="bottom", fill="x")
@@ -551,11 +614,17 @@ class App(TkinterDnD.Tk):
         btn_bottom.pack(fill="x", padx=8, pady=(0, 8))
 
         # 左侧：右键菜单管理
-        ttk.Button(btn_bottom, text="安装右键菜单", command=self._install_ctx).pack(side="left", padx=4)
-        ttk.Button(btn_bottom, text="卸载右键菜单", command=self._uninstall_ctx).pack(side="left", padx=4)
+        ttk.Button(btn_bottom, text="安装右键菜单", command=self._install_ctx).pack(
+            side="left", padx=4
+        )
+        ttk.Button(btn_bottom, text="卸载右键菜单", command=self._uninstall_ctx).pack(
+            side="left", padx=4
+        )
 
         # 右侧：解密
-        self.btn_decrypt = ttk.Button(btn_bottom, text="开始解密", command=self._start_decrypt)
+        self.btn_decrypt = ttk.Button(
+            btn_bottom, text="开始解密", command=self._start_decrypt
+        )
         self.btn_decrypt.pack(side="right", padx=4)
 
     # ── 拖拽 ──────────────────────────────────────────────
@@ -671,13 +740,16 @@ class App(TkinterDnD.Tk):
                 out_dir,
                 lambda msg: self.after(0, self._log, msg),
                 lambda val: self.after(0, self._set_progress, val),
-                lambda ok: self.after(0, self.btn_decrypt.configure, {"state": "normal"}),
+                lambda ok: self.after(
+                    0, self.btn_decrypt.configure, {"state": "normal"}
+                ),
             ),
             daemon=True,
         ).start()
 
 
 # ── 入口 ─────────────────────────────────────────────────────────────────────
+
 
 def main():
     args = sys.argv[1:]
