@@ -19,7 +19,7 @@
 #define IDC_BTN_UNINSTALL        107
 #define IDC_PROGRESS             108
 #define IDC_LOG                  109
-#define IDC_CHECK_AUTO           110
+/* IDC_CHECK_AUTO 110 已废弃，预留不重用 */
 #define IDC_EDIT_PROC            111
 #define IDC_EDIT_OUTDIR          112
 #define IDC_BTN_BROWSE           113
@@ -37,7 +37,6 @@ extern HWND g_hwndLog;
 extern HWND g_hwndProgress;
 extern HWND g_hwndProcEdit;
 extern HWND g_hwndOutDir;
-extern HWND g_hwndCheckAuto;
 extern HWND g_hwndBtnDecrypt;
 
 /* 路径列表（gui.c 管理，decrypt 线程只读） */

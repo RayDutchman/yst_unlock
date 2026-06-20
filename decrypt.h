@@ -36,6 +36,7 @@ void preserve_file_time(const wchar_t *path,
                         const FILETIME *create,
                         const FILETIME *access,
                         const FILETIME *write);
+BOOL is_file_encrypted(const wchar_t *path);
 
 /* ── INI 持久化 ────────────────────────────────────────── */
 void init_ini_path(void);

@@ -21,6 +21,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #include "decrypt.h"
@@ -28,9 +29,6 @@
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     (void)hInst; (void)hPrev; (void)lpCmd; (void)nShow;
-
-    /* DPI 感知 */
-    SetProcessDPIAware();
 
     /* INI 路径初始化 + 加载配置 */
     init_ini_path();
@@ -58,10 +56,73 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     /* --silent 模式 */
     if (argc >= 2 && wcscmp(argv[1], L"--silent") == 0) {
         int n = argc - 2;
+
+        /* 单实例合并：右键多文件时共用同一个进度窗口 */
+        HANDLE hMutex = CreateMutexW(NULL, FALSE, L"YST_Unlock_SingleInstance");
+        if (GetLastError() == ERROR_ALREADY_EXISTS) {
+            /* 后续实例：写入路径到临时目录后退出 */
+            wchar_t batch[MAX_PATH_LEN];
+            GetTempPathW(MAX_PATH_LEN, batch);
+            wcscat(batch, L"yst_unlock_batch\\");
+            CreateDirectoryW(batch, NULL);
+            wchar_t tmp[MAX_PATH_LEN * 2];
+            for (int i = 0; i < n; i++) {
+                _snwprintf(tmp, MAX_PATH_LEN * 2 - 1, L"%s%llu_%u",
+                           batch, GetTickCount64(), i);
+                HANDLE hf = CreateFileW(tmp, GENERIC_WRITE, 0, NULL,
+                                         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (hf != INVALID_HANDLE_VALUE) {
+                    DWORD cb = (DWORD)(wcslen(argv[2 + i]) * sizeof(wchar_t));
+                    WriteFile(hf, argv[2 + i], cb, &cb, NULL);
+                    CloseHandle(hf);
+                }
+            }
+            CloseHandle(hMutex);
+            LocalFree(argv);
+            return 0;
+        }
+
+        /* 首个实例：等待后续实例写入路径 */
+        Sleep(200);
+
         for (int i = 0; i < n; i++)
             g_paths[i] = argv[2 + i];
-        g_path_cnt = n;
-        run_progress_window(g_paths, n);
+        int total = n;
+
+        /* 读取后续实例写入的路径 */
+        wchar_t batch[MAX_PATH_LEN];
+        GetTempPathW(MAX_PATH_LEN, batch);
+        wcscat(batch, L"yst_unlock_batch\\");
+        WIN32_FIND_DATAW fd;
+        wchar_t pattern[MAX_PATH_LEN];
+        _snwprintf(pattern, MAX_PATH_LEN - 1, L"%s*", batch);
+        HANDLE hf = FindFirstFileW(pattern, &fd);
+        if (hf != INVALID_HANDLE_VALUE) {
+            do {
+                if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
+                    continue;
+                if (total >= MAX_PATHS) break;
+                wchar_t full[MAX_PATH_LEN];
+                _snwprintf(full, MAX_PATH_LEN - 1, L"%s%s", batch, fd.cFileName);
+                HANDLE hr = CreateFileW(full, GENERIC_READ, 0, NULL,
+                                         OPEN_EXISTING, FILE_FLAG_DELETE_ON_CLOSE, NULL);
+                if (hr != INVALID_HANDLE_VALUE) {
+                    wchar_t path[MAX_PATH_LEN];
+                    DWORD rd;
+                    if (ReadFile(hr, path, sizeof(path) - 2, &rd, NULL) && rd >= 2) {
+                        path[rd / sizeof(wchar_t)] = 0;
+                        g_paths[total++] = _wcsdup(path);
+                    }
+                    CloseHandle(hr);
+                }
+            } while (FindNextFileW(hf, &fd));
+            FindClose(hf);
+        }
+        RemoveDirectoryW(batch);
+        CloseHandle(hMutex);
+
+        g_path_cnt = total;
+        run_progress_window(g_paths, total);
         LocalFree(argv);
         return 0;
     }

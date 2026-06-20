@@ -18,6 +18,35 @@
 #include "decrypt.h"
 #include "gui.h"
 
+/* ── DPI 支持 ─────────────────────────────────────────────── */
+
+/* 当前窗口 DPI（进程启动时从系统获取，WM_DPICHANGED 时更新） */
+static UINT g_dpi = 96;
+
+/* 按 DPI 缩放像素值（所有硬编码的像素常量都应通过此宏转换） */
+#define S(n) MulDiv((n), g_dpi, 96)
+
+/* 创建与系统 UI 一致的字体
+ * SPI_GETNONCLIENTMETRICS 返回的 lfMessageFont.lfHeight 已经是当前系统 DPI
+ * 下的像素值，直接用 CreateFontIndirectW 即可，不需要再做 DPI 缩放。 */
+static HFONT make_gui_font(void) {
+    NONCLIENTMETRICSW ncm = {0};
+    ncm.cbSize = sizeof(ncm);
+    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    return CreateFontIndirectW(&ncm.lfMessageFont);
+}
+
+/* 将字体应用到所有子控件（并销毁旧字体） */
+static void apply_font_to_children(HWND hwnd, HFONT hNew, HFONT *pOld) {
+    if (*pOld) DeleteObject(*pOld);
+    *pOld = hNew;
+    HWND hc = GetWindow(hwnd, GW_CHILD);
+    while (hc) {
+        SendMessageW(hc, WM_SETFONT, (WPARAM)hNew, TRUE);
+        hc = GetWindow(hc, GW_HWNDNEXT);
+    }
+}
+
 /* ── 全局控件句柄（声明在 gui.h） ─────────────────────────── */
 HWND g_hwnd          = NULL;
 HWND g_hwndList      = NULL;
@@ -25,13 +54,13 @@ HWND g_hwndLog       = NULL;
 HWND g_hwndProgress  = NULL;
 HWND g_hwndProcEdit  = NULL;
 HWND g_hwndOutDir    = NULL;
-HWND g_hwndCheckAuto = NULL;
 HWND g_hwndBtnDecrypt= NULL;
 
 wchar_t **g_paths    = NULL;
 int       g_path_cnt = 0;
 
 /* ── 进度窗口全局 ──────────────────────────────────────────── */
+/* PROG_W / PROG_H 是 96dpi 基准尺寸，运行时通过 S() 缩放 */
 #define PROG_W 480
 #define PROG_H 260
 
@@ -42,6 +71,7 @@ static HWND     g_prog_status = NULL;
 static HWND     g_prog_btn    = NULL;
 static UINT_PTR g_prog_timer  = 0;
 static HANDLE   g_prog_thread = NULL;
+static HFONT    g_prog_font   = NULL;  /* 进度窗口字体（WM_DPICHANGED 时重建） */
 
 /* ── 进度窗口 ─────────────────────────────────────────────── */
 
@@ -49,23 +79,22 @@ static LRESULT CALLBACK ProgressWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     switch (msg) {
     case WM_CREATE: {
         HINSTANCE hInst = GetModuleHandleW(NULL);
+        int W = S(PROG_W), H = S(PROG_H);
         g_prog_status = CreateWindowW(L"STATIC", L"准备中...",
-            WS_CHILD|WS_VISIBLE|SS_LEFT, 10,8, PROG_W-20,20, hwnd, NULL, hInst, NULL);
+            WS_CHILD|WS_VISIBLE|SS_LEFT,
+            S(10), S(8), W-S(20), S(20), hwnd, NULL, hInst, NULL);
         g_prog_bar = CreateWindowExW(0, PROGRESS_CLASSW, NULL,
-            WS_CHILD|WS_VISIBLE|PBS_SMOOTH, 10,34, PROG_W-20,18, hwnd, (HMENU)IDC_PROGRESS, hInst, NULL);
+            WS_CHILD|WS_VISIBLE|PBS_SMOOTH,
+            S(10), S(34), W-S(20), S(18), hwnd, (HMENU)IDC_PROGRESS, hInst, NULL);
         SendMessageW(g_prog_bar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
         g_prog_log = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL,
-            10,58, PROG_W-20, PROG_H-58-38, hwnd, (HMENU)IDC_LOG, hInst, NULL);
-        SendMessageW(g_prog_log, EM_LIMITTEXT, 0, 0);
+            S(10), S(58), W-S(20), H-S(58)-S(38), hwnd, (HMENU)IDC_LOG, hInst, NULL);
+        SendMessageW(g_prog_log, EM_LIMITTEXT, 0x7FFFFFFE, 0);
         g_prog_btn = CreateWindowW(L"BUTTON", L"关闭",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON|WS_DISABLED,
-            PROG_W/2-40, PROG_H-34, 80, 26, hwnd, (HMENU)IDC_BTN_DECRYPT, hInst, NULL);
-        {
-            HFONT hF = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-            HWND hc = GetWindow(hwnd, GW_CHILD);
-            while (hc) { SendMessageW(hc, WM_SETFONT, (WPARAM)hF, FALSE); hc = GetWindow(hc, GW_HWNDNEXT); }
-        }
+            W/2-S(40), H-S(34), S(80), S(26), hwnd, (HMENU)IDC_BTN_DECRYPT, hInst, NULL);
+        apply_font_to_children(hwnd, make_gui_font(), &g_prog_font);
         SetTimer(hwnd, 1, 100, NULL);
         break;
     }
@@ -104,28 +133,51 @@ static LRESULT CALLBACK ProgressWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         SendMessageW(g_prog_bar, PBM_SETPOS, 100, 0);
         EnableWindow(g_prog_btn, TRUE);
         return 0;
+    case WM_CLOSE:
+        if (g_prog_thread) {
+            ULONGLONG deadline = GetTickCount64() + 5000;
+            while (WaitForSingleObject(g_prog_thread, 0) == WAIT_TIMEOUT) {
+                if (GetTickCount64() >= deadline) {
+                    TerminateThread(g_prog_thread, 0);
+                    break;
+                }
+                MSG m;
+                while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
+                    if (m.message == WM_QUIT) { PostQuitMessage((int)m.wParam); goto close_done_wait; }
+                    TranslateMessage(&m); DispatchMessageW(&m);
+                }
+                Sleep(20);
+            }
+            close_done_wait:
+            CloseHandle(g_prog_thread);
+            g_prog_thread = NULL;
+        }
+        DestroyWindow(hwnd);
+        return 0;
     case WM_COMMAND:
         if (LOWORD(wp) == IDC_BTN_DECRYPT) {
             if (g_prog_timer) KillTimer(hwnd, g_prog_timer);
-            if (g_prog_thread) {
-                ULONGLONG deadline = GetTickCount64() + 5000;
-                while (WaitForSingleObject(g_prog_thread, 0) == WAIT_TIMEOUT) {
-                    if (GetTickCount64() >= deadline) ExitProcess(0);
-                    MSG m;
-                    while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
-                        if (m.message == WM_QUIT) { PostQuitMessage((int)m.wParam); goto done_wait; }
-                        TranslateMessage(&m); DispatchMessageW(&m);
-                    }
-                    Sleep(20);
-                }
-                done_wait:
-                CloseHandle(g_prog_thread);
-                g_prog_thread = NULL;
-            }
-            DestroyWindow(hwnd);
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
         }
         return 0;
+    case WM_DPICHANGED: {
+        /* 进度窗口跨显示器：更新 DPI、重建字体、按建议 RECT 移动并重设客户区大小 */
+        g_dpi = HIWORD(wp);
+        apply_font_to_children(hwnd, make_gui_font(), &g_prog_font);
+        const RECT *r = (const RECT *)lp;
+        SetWindowPos(hwnd, NULL, r->left, r->top,
+                     r->right - r->left, r->bottom - r->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        /* 重新定位所有子控件 */
+        int W = S(PROG_W), H = S(PROG_H);
+        SetWindowPos(g_prog_status, NULL, S(10), S(8),  W-S(20), S(20),  SWP_NOZORDER|SWP_NOACTIVATE);
+        SetWindowPos(g_prog_bar,    NULL, S(10), S(34), W-S(20), S(18),  SWP_NOZORDER|SWP_NOACTIVATE);
+        SetWindowPos(g_prog_log,    NULL, S(10), S(58), W-S(20), H-S(58)-S(38), SWP_NOZORDER|SWP_NOACTIVATE);
+        SetWindowPos(g_prog_btn,    NULL, W/2-S(40), H-S(34), S(80), S(26), SWP_NOZORDER|SWP_NOACTIVATE);
+        return 0;
+    }
     case WM_DESTROY:
+        if (g_prog_font) { DeleteObject(g_prog_font); g_prog_font = NULL; }
         PostQuitMessage(0);
         return 0;
     }
@@ -135,6 +187,13 @@ static LRESULT CALLBACK ProgressWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 void run_progress_window(wchar_t **paths, int n) {
     g_paths    = paths;
     g_path_cnt = n;
+
+    /* 获取系统 DPI（进度窗口无父窗口，用系统 DPI） */
+    {
+        HDC hdc = GetDC(NULL);
+        g_dpi = (UINT)GetDeviceCaps(hdc, LOGPIXELSX);
+        ReleaseDC(NULL, hdc);
+    }
 
     HINSTANCE hInst = GetModuleHandleW(NULL);
     WNDCLASSEXW wc = {sizeof(wc)};
@@ -148,7 +207,7 @@ void run_progress_window(wchar_t **paths, int n) {
     int sw = GetSystemMetrics(SM_CXSCREEN);
     int sh = GetSystemMetrics(SM_CYSCREEN);
     {
-        RECT pr = {0, 0, PROG_W, PROG_H};
+        RECT pr = {0, 0, S(PROG_W), S(PROG_H)};
         AdjustWindowRect(&pr, WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU, FALSE);
         int pw = pr.right - pr.left;
         int ph = pr.bottom - pr.top;
@@ -167,21 +226,23 @@ void run_progress_window(wchar_t **paths, int n) {
     }
 }
 
-/* ── 主窗口：布局常量 ─────────────────────────────────────── */
+/* ── 主窗口：布局常量（96dpi 基准，运行时通过 S() 缩放） ──── */
 
-/* 初始客户区尺寸（WM_CREATE 用，WM_SIZE 按实际尺寸重算） */
+/* 初始客户区尺寸（96dpi 基准） */
 #define GUI_CLIENT_W   500
 #define GUI_CLIENT_H   560
-/* 最小客户区尺寸 */
+/* 最小客户区尺寸（96dpi 基准） */
 #define GUI_MIN_CW     400
 #define GUI_MIN_CH     560
 
-/* 边距与尺寸 */
+/* 边距与尺寸（96dpi 基准，全部通过 S() 使用） */
 #define LAYOUT_P       8    /* 外边距 */
 #define LAYOUT_BW      80   /* 普通按钮宽 */
 #define LAYOUT_BH      24   /* 普通按钮高 */
 #define LAYOUT_EH      22   /* Edit 高 */
-#define LAYOUT_CFG_H   150  /* 配置区固定高（5行） */
+#define LAYOUT_CFG_H   124  /* 配置区固定高（4行，去掉 checkbox 行） */
+
+static HFONT g_main_font = NULL;  /* 主窗口字体（WM_DPICHANGED 时重建） */
 
 /* ── 主窗口：子控件创建辅助函数（Step 4 重构） ─────────────── */
 
@@ -190,95 +251,86 @@ static void create_file_group(HWND hwnd, HINSTANCE hInst,
                                int y, int gw, int iw,
                                HWND *hGbFiles, HWND *hBtnAddFile,
                                HWND *hBtnAddDir, HWND *hListBox) {
-    const int P = LAYOUT_P, BW = LAYOUT_BW, BH = LAYOUT_BH;
+    const int P = S(LAYOUT_P), BW = S(LAYOUT_BW), BH = S(LAYOUT_BH);
 
     *hGbFiles = CreateWindowW(L"BUTTON", L"待解密文件 / 文件夹（可拖入）",
         WS_CHILD|WS_VISIBLE|BS_GROUPBOX|WS_CLIPCHILDREN,
-        P, y, gw, 196, hwnd, NULL, hInst, NULL);
+        P, y, gw, S(196), hwnd, NULL, hInst, NULL);
 
     *hBtnAddFile = CreateWindowW(L"BUTTON", L"添加文件",
         WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-        P+8, y+18, BW, BH, hwnd, (HMENU)IDC_BTN_ADDFILE, hInst, NULL);
+        P+S(8), y+S(18), BW, BH, hwnd, (HMENU)IDC_BTN_ADDFILE, hInst, NULL);
     *hBtnAddDir = CreateWindowW(L"BUTTON", L"添加文件夹",
         WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-        P+8+BW+8, y+18, BW, BH, hwnd, (HMENU)IDC_BTN_ADDDIR, hInst, NULL);
+        P+S(8)+BW+S(8), y+S(18), BW, BH, hwnd, (HMENU)IDC_BTN_ADDDIR, hInst, NULL);
     CreateWindowW(L"BUTTON", L"清空列表",
         WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-        P+gw-8-BW, y+18, BW, BH, hwnd, (HMENU)IDC_BTN_CLEAR, hInst, NULL);
+        P+gw-S(8)-BW, y+S(18), BW, BH, hwnd, (HMENU)IDC_BTN_CLEAR, hInst, NULL);
 
     *hListBox = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
         WS_CHILD|WS_VISIBLE|WS_VSCROLL|WS_HSCROLL|
         LBS_NOTIFY|LBS_NOINTEGRALHEIGHT|LBS_EXTENDEDSEL,
-        P+8, y+48, iw, 136, hwnd, (HMENU)IDC_LISTBOX, hInst, NULL);
+        P+S(8), y+S(48), iw, S(136), hwnd, (HMENU)IDC_LISTBOX, hInst, NULL);
 }
 
-/* 配置 GroupBox 内的控件（5行） */
+/* 配置 GroupBox 内的控件（4行，无 checkbox） */
 static void create_config_group(HWND hwnd, HINSTANCE hInst,
                                  int y, int gw, int iw,
                                  HWND *hGbCfg,
-                                 HWND *hCheckAuto,
-                                 HWND *hProcEdit,   HWND *hStaticProc, HWND *hStaticHint,
+                                 HWND *hProcEdit,   HWND *hStaticProc,
                                  HWND *hStaticOutLabel, HWND *hOutDir) {
-    const int P = LAYOUT_P, EH = LAYOUT_EH;
+    const int P = S(LAYOUT_P), EH = S(LAYOUT_EH);
+    const int LW = S(72);   /* 标签宽，使 Edit 左边对齐：P+S(8)+LW+S(4) */
 
     *hGbCfg = CreateWindowW(L"BUTTON", L"解密配置",
         WS_CHILD|WS_VISIBLE|BS_GROUPBOX|WS_CLIPCHILDREN,
-        P, y, gw, LAYOUT_CFG_H, hwnd, NULL, hInst, NULL);
+        P, y, gw, S(LAYOUT_CFG_H), hwnd, NULL, hInst, NULL);
 
-    /* 行1 y+20：自动模式复选框 */
-    *hCheckAuto = CreateWindowW(L"BUTTON", L"自动匹配进程名（推荐）",
-        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX,
-        P+8, y+20, 220, 20, hwnd, (HMENU)IDC_CHECK_AUTO, hInst, NULL);
-    SendMessageW(*hCheckAuto, BM_SETCHECK, BST_CHECKED, 0);
-
-    /* 行2 y+46：覆写进程名
-     * 标签用 SS_CENTERIMAGE 使文字在控件高度内垂直居中，高度与 Edit 一致（EH）*/
+    /* 行1 y+20：覆写进程名（留空 = 自动） */
     *hStaticProc = CreateWindowW(L"STATIC", L"覆写进程名:",
         WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
-        P+8, y+46, 72, EH, hwnd, NULL, hInst, NULL);
+        P+S(8), y+S(20), LW, EH, hwnd, NULL, hInst, NULL);
     *hProcEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,
-        P+84, y+46, 160, EH, hwnd, (HMENU)IDC_EDIT_PROC, hInst, NULL);
-    *hStaticHint = CreateWindowW(L"STATIC", L"(留空=自动)",
-        WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
-        P+84+160+4, y+46, 90, EH, hwnd, NULL, hInst, NULL);
+        P+S(8)+LW+S(4), y+S(20), S(160), EH, hwnd, (HMENU)IDC_EDIT_PROC, hInst, NULL);
+    /* placeholder 灰字提示，Edit 为空时显示，替代原来的 Static hint */
+    SendMessageW(*hProcEdit, EM_SETCUEBANNER, FALSE, (LPARAM)L"留空 = 自动匹配");
 
-    /* 行3 y+72：扩展名映射 */
+    /* 行2 y+46：扩展名映射 */
     CreateWindowW(L"STATIC", L"扩展名映射:",
         WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
-        P+8, y+72, 72, EH, hwnd, (HMENU)IDC_STATIC_EXTMAP_LBL, hInst, NULL);
+        P+S(8), y+S(46), LW, EH, hwnd, (HMENU)IDC_STATIC_EXTMAP_LBL, hInst, NULL);
     CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"已配置 0 条映射",
         WS_CHILD|WS_VISIBLE|ES_READONLY,
-        P+84, y+72, 160, EH, hwnd, (HMENU)IDC_LIST_EXT_MAP, hInst, NULL);
+        P+S(8)+LW+S(4), y+S(46), S(160), EH, hwnd, (HMENU)IDC_LIST_EXT_MAP, hInst, NULL);
     CreateWindowW(L"BUTTON", L"管理...",
         WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-        P+84+160+4, y+72, 60, EH, hwnd, (HMENU)IDC_BTN_EXT_MAP, hInst, NULL);
+        P+S(8)+LW+S(4)+S(160)+S(4), y+S(46), S(60), EH, hwnd, (HMENU)IDC_BTN_EXT_MAP, hInst, NULL);
 
-    /* 行4 y+98：兜底进程名 */
+    /* 行3 y+72：兜底进程名 */
     CreateWindowW(L"STATIC", L"兜底进程名:",
         WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
-        P+8, y+98, 72, EH, hwnd, (HMENU)IDC_STATIC_FALLBACK_LBL, hInst, NULL);
+        P+S(8), y+S(72), LW, EH, hwnd, (HMENU)IDC_STATIC_FALLBACK_LBL, hInst, NULL);
     CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_fallback_proc,
         WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,
-        P+84, y+98, 160, EH, hwnd, (HMENU)IDC_EDIT_FALLBACK, hInst, NULL);
+        P+S(8)+LW+S(4), y+S(72), S(160), EH, hwnd, (HMENU)IDC_EDIT_FALLBACK, hInst, NULL);
     CreateWindowW(L"STATIC", L"(注册表未命中时)",
         WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
-        P+84+160+4, y+98, 120, EH, hwnd, (HMENU)IDC_STATIC_FALLBACK_HINT, hInst, NULL);
+        P+S(8)+LW+S(4)+S(160)+S(4), y+S(72), S(120), EH, hwnd, (HMENU)IDC_STATIC_FALLBACK_HINT, hInst, NULL);
 
-    /* 行5 y+124：输出目录（弹性宽）
-     * lw=72 使 Edit 左边与行2-4 对齐：P+8+72+4 = P+84 */
+    /* 行4 y+98：输出目录（弹性宽） */
     {
-        const int lw = 72, bw2 = 56, gap = 4;
-        const int ew = iw - lw - gap - bw2 - gap;
+        const int bw2 = S(56), gap = S(4);
+        const int ew = iw - LW - gap - bw2 - gap;
         *hStaticOutLabel = CreateWindowW(L"STATIC", L"输出目录:",
             WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
-            P+8, y+124, lw, EH, hwnd, NULL, hInst, NULL);
+            P+S(8), y+S(98), LW, EH, hwnd, NULL, hInst, NULL);
         *hOutDir = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,
-            P+84, y+124, ew, EH, hwnd, (HMENU)IDC_EDIT_OUTDIR, hInst, NULL);
+            P+S(8)+LW+gap, y+S(98), ew, EH, hwnd, (HMENU)IDC_EDIT_OUTDIR, hInst, NULL);
         CreateWindowW(L"BUTTON", L"浏览...",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            P+84+ew+gap, y+124, bw2, EH, hwnd, (HMENU)IDC_BTN_BROWSE, hInst, NULL);
+            P+S(8)+LW+gap+ew+gap, y+S(98), bw2, EH, hwnd, (HMENU)IDC_BTN_BROWSE, hInst, NULL);
     }
 }
 
@@ -287,29 +339,29 @@ static void create_log_group(HWND hwnd, HINSTANCE hInst,
                               int y, int gw, int iw,
                               HWND *hGbLog, HWND *hProg,
                               HWND *hLog, HWND *hBtnDecrypt) {
-    const int P = LAYOUT_P, BW = LAYOUT_BW, BH = LAYOUT_BH;
-    int log_btn_y = y + 168;
+    const int P = S(LAYOUT_P), BW = S(LAYOUT_BW), BH = S(LAYOUT_BH);
+    int log_btn_y = y + S(168);
 
     *hGbLog = CreateWindowW(L"BUTTON", L"日志",
         WS_CHILD|WS_VISIBLE|BS_GROUPBOX|WS_CLIPCHILDREN,
-        P, y, gw, 164, hwnd, NULL, hInst, NULL);
+        P, y, gw, S(164), hwnd, NULL, hInst, NULL);
     *hProg = CreateWindowExW(0, PROGRESS_CLASSW, NULL,
         WS_CHILD|WS_VISIBLE|PBS_SMOOTH,
-        P+8, y+18, iw, 16, hwnd, (HMENU)IDC_PROGRESS, hInst, NULL);
+        P+S(8), y+S(18), iw, S(16), hwnd, (HMENU)IDC_PROGRESS, hInst, NULL);
     SendMessageW(*hProg, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
     *hLog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD|WS_VISIBLE|WS_VSCROLL|WS_HSCROLL|
         ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL,
-        P+8, y+40, iw, 112, hwnd, (HMENU)IDC_LOG, hInst, NULL);
-    SendMessageW(*hLog, EM_LIMITTEXT, 65535, 0);
+        P+S(8), y+S(40), iw, S(112), hwnd, (HMENU)IDC_LOG, hInst, NULL);
+    SendMessageW(*hLog, EM_LIMITTEXT, 0x7FFFFFFE, 0);
 
     /* 底部按钮行 */
     CreateWindowW(L"BUTTON", L"安装右键菜单",
         WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-        P, log_btn_y, 96, BH, hwnd, (HMENU)IDC_BTN_INSTALL, hInst, NULL);
+        P, log_btn_y, S(96), BH, hwnd, (HMENU)IDC_BTN_INSTALL, hInst, NULL);
     CreateWindowW(L"BUTTON", L"卸载右键菜单",
         WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-        P+96+6, log_btn_y, 96, BH, hwnd, (HMENU)IDC_BTN_UNINSTALL, hInst, NULL);
+        P+S(96)+S(6), log_btn_y, S(96), BH, hwnd, (HMENU)IDC_BTN_UNINSTALL, hInst, NULL);
     *hBtnDecrypt = CreateWindowW(L"BUTTON", L"开始解密",
         WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
         P+gw-BW, log_btn_y, BW, BH, hwnd, (HMENU)IDC_BTN_DECRYPT, hInst, NULL);
@@ -392,7 +444,7 @@ static void on_btn_browse(HWND hwnd, HWND hOutDir) {
 }
 
 static void on_btn_decrypt(HWND hwnd,
-                            HWND hCheckAuto, HWND hProcEdit,
+                            HWND hProcEdit,
                             HWND hBtnDecrypt, HWND hBtnAddFile, HWND hBtnAddDir,
                             HWND hProg, HWND hLog, HWND hListBox,
                             BOOL *is_decrypting) {
@@ -401,16 +453,10 @@ static void on_btn_decrypt(HWND hwnd,
                     MB_OK|MB_ICONWARNING);
         return;
     }
-    BOOL auto_mode = (SendMessageW(hCheckAuto, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    /* 覆写进程名：留空=自动匹配，非空=强制使用 */
     wchar_t proc_buf[MAX_PATH_LEN] = {0};
-    if (!auto_mode) {
-        GetWindowTextW(hProcEdit, proc_buf, MAX_PATH_LEN);
-        if (!proc_buf[0]) {
-            MessageBoxW(hwnd, L"手动模式下请填写覆写进程名", L"提示",
-                        MB_OK|MB_ICONWARNING);
-            return;
-        }
-    }
+    GetWindowTextW(hProcEdit, proc_buf, MAX_PATH_LEN);
+
     wchar_t fallback_buf[MAX_PATH_LEN];
     wcsncpy(fallback_buf, g_fallback_proc, MAX_PATH_LEN-1);
     if (!fallback_buf[0]) wcscpy(fallback_buf, L"POWERPNT.EXE");
@@ -423,19 +469,19 @@ static void on_btn_decrypt(HWND hwnd,
      EnableWindow(hBtnAddFile, FALSE);
      EnableWindow(hBtnAddDir,  FALSE);
      EnableWindow(GetDlgItem(hwnd, IDC_BTN_CLEAR),   FALSE);
-     EnableWindow(GetDlgItem(hwnd, IDC_BTN_EXT_MAP), FALSE);  /* 防止解密中修改 ext_map */
+     EnableWindow(GetDlgItem(hwnd, IDC_BTN_EXT_MAP), FALSE);
      EnableWindow(hListBox, FALSE);
     SendMessageW(hProg, PBM_SETPOS, 0, 0);
     SetWindowTextW(hLog, L"");
 
     wchar_t mode_buf[512];
     _snwprintf(mode_buf, 511, L"模式：%s  兜底：%s",
-               auto_mode ? L"自动" : proc_buf, fallback_buf);
+               proc_buf[0] ? proc_buf : L"自动", fallback_buf);
     mode_buf[511] = 0;
     log_append(hLog, mode_buf);
 
     HANDLE ht = start_decrypt_thread(hwnd, g_paths, g_path_cnt,
-                         auto_mode ? NULL : proc_buf,
+                         proc_buf[0] ? proc_buf : NULL,
                          fallback_buf,
                          out_buf[0] ? out_buf : NULL);
     if (ht) CloseHandle(ht);
@@ -456,80 +502,77 @@ static void on_btn_decrypt(HWND hwnd,
 static void layout_main_window(HWND hwnd, int cw, int ch,
                                 HWND hGbFiles, HWND hBtnAddFile, HWND hBtnAddDir,
                                 HWND hGbCfg,
-                                HWND hCheckAuto,
-                                HWND hStaticProc, HWND hStaticHint,
+                                HWND hStaticProc,
                                 HWND hStaticOutLabel,
                                 HWND hGbLog) {
-    const int P      = LAYOUT_P;
-    const int BH     = LAYOUT_BH;
-    const int EH     = LAYOUT_EH;
-    const int BW     = LAYOUT_BW;
+    const int P      = S(LAYOUT_P);
+    const int BH     = S(LAYOUT_BH);
+    const int EH     = S(LAYOUT_EH);
+    const int BW     = S(LAYOUT_BW);
+    const int LW     = S(72);   /* 标签宽 */
     const int GW     = cw - 2*P;
-    const int IW     = GW - 16;
-    const int BTN_H  = BH + 10;   /* 底部按钮行预留高度 */
-    const int CFG_H  = LAYOUT_CFG_H;
+    const int IW     = GW - S(16);
+    const int BTN_H  = BH + S(10);   /* 底部按钮行预留高度 */
+    const int CFG_H  = S(LAYOUT_CFG_H);
 
-    /* 文件列表高度：客户区 35%，最小 80 */
+    /* 文件列表高度：客户区 35%，最小 S(80) */
     int list_h = ch * 35 / 100;
-    if (list_h < 80) list_h = 80;
-    int gb1_h = 48 + list_h;
-    int y = 4;
+    if (list_h < S(80)) list_h = S(80);
+    int gb1_h = S(48) + list_h;
+    int y = S(4);
 
     /* 文件 GroupBox */
     SetWindowPos(hGbFiles, NULL, P, y, GW, gb1_h, SWP_NOZORDER|SWP_NOACTIVATE);
-    SetWindowPos(hBtnAddFile, NULL, P+8, y+18, BW, BH, SWP_NOZORDER|SWP_NOACTIVATE);
-    SetWindowPos(hBtnAddDir,  NULL, P+8+BW+8, y+18, BW, BH, SWP_NOZORDER|SWP_NOACTIVATE);
-    SetWindowPos(GetDlgItem(hwnd, IDC_BTN_CLEAR), NULL, P+GW-8-BW, y+18, BW, BH, SWP_NOZORDER|SWP_NOACTIVATE);
-    SetWindowPos(g_hwndList, NULL, P+8, y+48, IW, list_h, SWP_NOZORDER|SWP_NOACTIVATE);
+    SetWindowPos(hBtnAddFile, NULL, P+S(8), y+S(18), BW, BH, SWP_NOZORDER|SWP_NOACTIVATE);
+    SetWindowPos(hBtnAddDir,  NULL, P+S(8)+BW+S(8), y+S(18), BW, BH, SWP_NOZORDER|SWP_NOACTIVATE);
+    SetWindowPos(GetDlgItem(hwnd, IDC_BTN_CLEAR), NULL, P+GW-S(8)-BW, y+S(18), BW, BH, SWP_NOZORDER|SWP_NOACTIVATE);
+    SetWindowPos(g_hwndList, NULL, P+S(8), y+S(48), IW, list_h, SWP_NOZORDER|SWP_NOACTIVATE);
 
     /* 配置 GroupBox */
-    y += gb1_h + 4;
+    y += gb1_h + S(4);
     SetWindowPos(hGbCfg, NULL, P, y, GW, CFG_H, SWP_NOZORDER|SWP_NOACTIVATE);
-    /* 行1 y+20 */
-    SetWindowPos(hCheckAuto, NULL, P+8, y+20, 220, 20, SWP_NOZORDER|SWP_NOACTIVATE);
-    /* 行2 y+46 */
-    SetWindowPos(hStaticProc,      NULL, P+8,        y+46, 72,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
-    SetWindowPos(g_hwndProcEdit,   NULL, P+84,       y+46, 160, EH, SWP_NOZORDER|SWP_NOACTIVATE);
-    SetWindowPos(hStaticHint,      NULL, P+84+160+4, y+46, 90,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
-    /* 行3 y+72 */
+    /* 行1：覆写进程名 */
+    SetWindowPos(hStaticProc,      NULL, P+S(8),         y+S(20), LW,    EH, SWP_NOZORDER|SWP_NOACTIVATE);
+    SetWindowPos(g_hwndProcEdit,   NULL, P+S(8)+LW+S(4), y+S(20), S(160),EH, SWP_NOZORDER|SWP_NOACTIVATE);
+    /* 行2：扩展名映射 */
     SetWindowPos(GetDlgItem(hwnd, IDC_STATIC_EXTMAP_LBL), NULL,
-        P+8,         y+72, 72,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
+        P+S(8),                       y+S(46), LW,    EH, SWP_NOZORDER|SWP_NOACTIVATE);
     SetWindowPos(GetDlgItem(hwnd, IDC_LIST_EXT_MAP), NULL,
-        P+84,        y+72, 160, EH, SWP_NOZORDER|SWP_NOACTIVATE);
+        P+S(8)+LW+S(4),               y+S(46), S(160),EH, SWP_NOZORDER|SWP_NOACTIVATE);
     SetWindowPos(GetDlgItem(hwnd, IDC_BTN_EXT_MAP), NULL,
-        P+84+160+4,  y+72, 60,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
-    /* 行4 y+98 */
+        P+S(8)+LW+S(4)+S(160)+S(4),   y+S(46), S(60), EH, SWP_NOZORDER|SWP_NOACTIVATE);
+    /* 行3：兜底进程名 */
     SetWindowPos(GetDlgItem(hwnd, IDC_STATIC_FALLBACK_LBL), NULL,
-        P+8,    y+98, 72,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
+        P+S(8),                       y+S(72), LW,    EH, SWP_NOZORDER|SWP_NOACTIVATE);
     SetWindowPos(GetDlgItem(hwnd, IDC_EDIT_FALLBACK), NULL,
-        P+84,   y+98, 160, EH, SWP_NOZORDER|SWP_NOACTIVATE);
+        P+S(8)+LW+S(4),               y+S(72), S(160),EH, SWP_NOZORDER|SWP_NOACTIVATE);
     SetWindowPos(GetDlgItem(hwnd, IDC_STATIC_FALLBACK_HINT), NULL,
-        P+84+160+4, y+98, 120, EH, SWP_NOZORDER|SWP_NOACTIVATE);
-    /* 行5 y+124：输出目录（弹性宽，lw=72 使 Edit 与行2-4 左边对齐：P+8+72+4=P+84） */
+        P+S(8)+LW+S(4)+S(160)+S(4),  y+S(72), S(120),EH, SWP_NOZORDER|SWP_NOACTIVATE);
+    /* 行4：输出目录（弹性宽） */
     {
-        const int lw=72, bw2=56, gap=4;
-        int ew = IW - lw - gap - bw2 - gap;
-        if (ew < 60) ew = 60;
-        SetWindowPos(hStaticOutLabel, NULL, P+8,       y+124, lw,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
-        SetWindowPos(g_hwndOutDir,    NULL, P+84,      y+124, ew,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
+        const int bw2 = S(56), gap = S(4);
+        int ew = IW - LW - gap - bw2 - gap;
+        if (ew < S(60)) ew = S(60);
+        SetWindowPos(hStaticOutLabel, NULL, P+S(8),           y+S(98), LW,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
+        SetWindowPos(g_hwndOutDir,    NULL, P+S(8)+LW+gap,    y+S(98), ew,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
         SetWindowPos(GetDlgItem(hwnd, IDC_BTN_BROWSE), NULL,
-            P+84+ew+gap, y+124, bw2, EH, SWP_NOZORDER|SWP_NOACTIVATE);
+            P+S(8)+LW+gap+ew+gap, y+S(98), bw2, EH, SWP_NOZORDER|SWP_NOACTIVATE);
     }
 
     /* 日志 GroupBox（填满剩余） */
-    y += CFG_H + 4;
-    int log_gb_h = ch - y - BTN_H - 4;
-    if (log_gb_h < 60) log_gb_h = 60;
+    y += CFG_H + S(4);
+    int log_gb_h = ch - y - BTN_H - S(4);
+    if (log_gb_h < S(60)) log_gb_h = S(60);
     SetWindowPos(hGbLog, NULL, P, y, GW, log_gb_h, SWP_NOZORDER|SWP_NOACTIVATE);
-    SetWindowPos(g_hwndProgress, NULL, P+8, y+18, IW, 16, SWP_NOZORDER|SWP_NOACTIVATE);
-    int log_edit_h = log_gb_h - 40 - 8;
-    if (log_edit_h < 30) log_edit_h = 30;
-    SetWindowPos(g_hwndLog, NULL, P+8, y+40, IW, log_edit_h, SWP_NOZORDER|SWP_NOACTIVATE);
+    SetWindowPos(g_hwndProgress, NULL, P+S(8), y+S(18), IW, S(16), SWP_NOZORDER|SWP_NOACTIVATE);
+    int log_edit_h = log_gb_h - S(40) - S(8);
+    if (log_edit_h < S(30)) log_edit_h = S(30);
+    SetWindowPos(g_hwndLog, NULL, P+S(8), y+S(40), IW, log_edit_h, SWP_NOZORDER|SWP_NOACTIVATE);
 
     /* 底部按钮行 */
-    int by = ch - BH - 10;
-    SetWindowPos(GetDlgItem(hwnd, IDC_BTN_INSTALL),   NULL, P,       by, 96, BH, SWP_NOZORDER|SWP_NOACTIVATE);
-    SetWindowPos(GetDlgItem(hwnd, IDC_BTN_UNINSTALL), NULL, P+96+6,  by, 96, BH, SWP_NOZORDER|SWP_NOACTIVATE);
+    int by = ch - BH - S(10);
+    SetWindowPos(GetDlgItem(hwnd, IDC_BTN_INSTALL),   NULL, P,          by, S(96), BH, SWP_NOZORDER|SWP_NOACTIVATE);
+    SetWindowPos(GetDlgItem(hwnd, IDC_BTN_UNINSTALL), NULL, P+S(96)+S(6), by, S(96), BH, SWP_NOZORDER|SWP_NOACTIVATE);
     SetWindowPos(g_hwndBtnDecrypt, NULL, P+GW-BW, by, BW, BH, SWP_NOZORDER|SWP_NOACTIVATE);
 
     InvalidateRect(hwnd, NULL, TRUE);
@@ -542,17 +585,17 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     static HWND hLog=NULL, hProg=NULL;
     static HWND hGbFiles=NULL, hGbCfg=NULL, hGbLog=NULL;
     static HWND hBtnAddFile=NULL, hBtnAddDir=NULL;
-    static HWND hCheckAuto=NULL, hBtnDecrypt=NULL;
-    static HWND hStaticProc=NULL, hStaticHint=NULL, hStaticOutLabel=NULL;
+    static HWND hBtnDecrypt=NULL;
+    static HWND hStaticProc=NULL, hStaticOutLabel=NULL;
     static BOOL is_decrypting = FALSE;
 
     switch (msg) {
     case WM_CREATE: {
         HINSTANCE hInst = GetModuleHandleW(NULL);
-        const int P  = LAYOUT_P;
-        const int GW = GUI_CLIENT_W - 2*P;
-        const int IW = GW - 16;
-        int y = 4;
+        const int P  = S(LAYOUT_P);
+        const int GW = S(GUI_CLIENT_W) - 2*P;
+        const int IW = GW - S(16);
+        int y = S(4);
 
         /* 文件列表区 */
         HWND hListBox = NULL;
@@ -561,38 +604,32 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         /* 配置区 */
         HWND hProcEdit=NULL, hOutDir=NULL;
-        y += 200;
+        y += S(200);
         create_config_group(hwnd, hInst, y, GW, IW,
-                            &hGbCfg, &hCheckAuto,
-                            &hProcEdit, &hStaticProc, &hStaticHint,
+                            &hGbCfg,
+                            &hProcEdit, &hStaticProc,
                             &hStaticOutLabel, &hOutDir);
 
         /* 日志区 + 底部按钮 */
-        y += 96;
+        y += S(96);
         create_log_group(hwnd, hInst, y, GW, IW,
                          &hGbLog, &hProg, &hLog, &hBtnDecrypt);
 
-        /* 统一应用系统 GUI 字体 */
-        HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        HWND hc = GetWindow(hwnd, GW_CHILD);
-        while (hc) {
-            SendMessageW(hc, WM_SETFONT, (WPARAM)hFont, FALSE);
-            hc = GetWindow(hc, GW_HWNDNEXT);
-        }
+        /* 统一应用 DPI 感知字体 */
+        apply_font_to_children(hwnd, make_gui_font(), &g_main_font);
 
         /* 发布到全局句柄 */
         g_hwndLog      = hLog;
         g_hwndProgress = hProg;
         g_hwndProcEdit = hProcEdit;
         g_hwndOutDir   = hOutDir;
-        g_hwndCheckAuto= hCheckAuto;
         g_hwndBtnDecrypt = hBtnDecrypt;
         g_hwndList     = hListBox;
 
         /* ListBox 行高适配字体 */
         {
             HDC hdc = GetDC(hListBox);
-            HFONT hOldF = (HFONT)SelectObject(hdc, hFont);
+            HFONT hOldF = (HFONT)SelectObject(hdc, g_main_font);
             TEXTMETRICW tm;
             GetTextMetricsW(hdc, &tm);
             SelectObject(hdc, hOldF);
@@ -616,7 +653,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
 
     case WM_GETMINMAXINFO: {
-        RECT rc = {0, 0, GUI_MIN_CW, GUI_MIN_CH};
+        RECT rc = {0, 0, S(GUI_MIN_CW), S(GUI_MIN_CH)};
         AdjustWindowRectEx(&rc, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_ACCEPTFILES);
         MINMAXINFO *mm = (MINMAXINFO*)lp;
         mm->ptMinTrackSize.x = rc.right - rc.left;
@@ -684,8 +721,8 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == SIZE_MINIMIZED) return 0;
         layout_main_window(hwnd, LOWORD(lp), HIWORD(lp),
                            hGbFiles, hBtnAddFile, hBtnAddDir,
-                           hGbCfg, hCheckAuto,
-                           hStaticProc, hStaticHint, hStaticOutLabel,
+                           hGbCfg,
+                           hStaticProc, hStaticOutLabel,
                            hGbLog);
         return 0;
     }
@@ -702,8 +739,6 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SendMessageW(g_hwndList, LB_RESETCONTENT, 0, 0);
         } else if (id == IDC_BTN_BROWSE) {
             on_btn_browse(hwnd, g_hwndOutDir);
-        } else if (id == IDC_CHECK_AUTO) {
-            (void)0;
         } else if (id == IDC_EDIT_FALLBACK &&
                    (HIWORD(wp) == EN_KILLFOCUS || HIWORD(wp) == EN_CHANGE)) {
             HWND hFb = GetDlgItem(hwnd, IDC_EDIT_FALLBACK);
@@ -727,7 +762,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             uninstall_context_menu(msg2, 256);
             MessageBoxW(hwnd, msg2, L"右键菜单", MB_OK|MB_ICONINFORMATION);
         } else if (id == IDC_BTN_DECRYPT && !is_decrypting) {
-            on_btn_decrypt(hwnd, hCheckAuto, g_hwndProcEdit,
+            on_btn_decrypt(hwnd, g_hwndProcEdit,
                            hBtnDecrypt, hBtnAddFile, hBtnAddDir,
                            hProg, hLog, g_hwndList,
                            &is_decrypting);
@@ -762,7 +797,30 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DestroyWindow(hwnd);
         return 0;
 
+    case WM_DPICHANGED: {
+        /* 更新 DPI、重建字体，按 Windows 建议的 RECT 移动 + 缩放窗口 */
+        g_dpi = HIWORD(wp);
+        apply_font_to_children(hwnd, make_gui_font(), &g_main_font);
+        /* 更新 ListBox 行高 */
+        {
+            HDC hdc = GetDC(g_hwndList);
+            HFONT hOld = (HFONT)SelectObject(hdc, g_main_font);
+            TEXTMETRICW tm;
+            GetTextMetricsW(hdc, &tm);
+            SelectObject(hdc, hOld);
+            ReleaseDC(g_hwndList, hdc);
+            SendMessageW(g_hwndList, LB_SETITEMHEIGHT, 0, tm.tmHeight + 2);
+        }
+        const RECT *r = (const RECT *)lp;
+        SetWindowPos(hwnd, NULL, r->left, r->top,
+                     r->right - r->left, r->bottom - r->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        /* WM_SIZE 会由 SetWindowPos 自动触发，重排布局 */
+        return 0;
+    }
+
     case WM_DESTROY:
+        if (g_main_font) { DeleteObject(g_main_font); g_main_font = NULL; }
         PostQuitMessage(0);
         return 0;
     }
@@ -771,6 +829,13 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 void run_main_gui(wchar_t **init_paths, int n) {
     HINSTANCE hInst = GetModuleHandleW(NULL);
+
+    /* 获取主显示器 DPI */
+    {
+        HDC hdc = GetDC(NULL);
+        g_dpi = (UINT)GetDeviceCaps(hdc, LOGPIXELSX);
+        ReleaseDC(NULL, hdc);
+    }
 
     WNDCLASSEXW wc = {sizeof(wc)};
     wc.lpszClassName = L"YST_MainWnd";
@@ -783,7 +848,7 @@ void run_main_gui(wchar_t **init_paths, int n) {
     int sw = GetSystemMetrics(SM_CXSCREEN);
     int sh = GetSystemMetrics(SM_CYSCREEN);
     DWORD wstyle = WS_OVERLAPPEDWINDOW;
-    RECT rc2 = {0, 0, GUI_CLIENT_W, GUI_CLIENT_H};
+    RECT rc2 = {0, 0, S(GUI_CLIENT_W), S(GUI_CLIENT_H)};
     AdjustWindowRectEx(&rc2, wstyle, FALSE, WS_EX_ACCEPTFILES);
     int fw = rc2.right - rc2.left;
     int fh = rc2.bottom - rc2.top;
@@ -825,6 +890,8 @@ void run_main_gui(wchar_t **init_paths, int n) {
 #define IDC_EXTDLG_DEL    205
 #define IDC_EXTDLG_OK     206
 
+static HFONT g_extdlg_font = NULL;  /* 对话框字体 */
+
 static void extdlg_refresh_list(HWND hList) {
     ListView_DeleteAllItems(hList);
     for (int i = 0; i < g_ext_map_cnt; i++) {
@@ -843,47 +910,45 @@ static LRESULT CALLBACK ExtMapDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_CREATE: {
         HINSTANCE hInst = GetModuleHandleW(NULL);
-        HFONT hF = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        int W = EXTDLG_W, H = EXTDLG_H;
+        int W = S(EXTDLG_W), H = S(EXTDLG_H);
         HWND hList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
             WS_CHILD|WS_VISIBLE|LVS_REPORT|LVS_SINGLESEL|LVS_SHOWSELALWAYS,
-            8, 8, W-16, H-98, hwnd, (HMENU)IDC_EXTDLG_LIST, hInst, NULL);
-        SendMessageW(hList, WM_SETFONT, (WPARAM)hF, FALSE);
+            S(8), S(8), W-S(16), H-S(98), hwnd, (HMENU)IDC_EXTDLG_LIST, hInst, NULL);
         LVCOLUMNW col = {0};
         col.mask = LVCF_TEXT|LVCF_WIDTH;
-        col.cx   = 120; col.pszText = L"扩展名";
+        col.cx   = S(120); col.pszText = L"扩展名";
         ListView_InsertColumn(hList, 0, &col);
-        col.cx   = W-16-120-4; col.pszText = L"进程名";
+        col.cx   = W-S(16)-S(120)-S(4); col.pszText = L"进程名";
         ListView_InsertColumn(hList, 1, &col);
         extdlg_refresh_list(hList);
         ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT);
         /* 标签行 */
         CreateWindowW(L"STATIC", L"扩展名（如 .xlsx）",
             WS_CHILD|WS_VISIBLE|SS_LEFT,
-            8, H-84, 110, 18, hwnd, NULL, hInst, NULL);
+            S(8), H-S(84), S(110), S(18), hwnd, NULL, hInst, NULL);
         CreateWindowW(L"STATIC", L"进程名（如 EXCEL.EXE）",
             WS_CHILD|WS_VISIBLE|SS_LEFT,
-            124, H-84, 140, 18, hwnd, NULL, hInst, NULL);
+            S(124), H-S(84), S(140), S(18), hwnd, NULL, hInst, NULL);
         /* 输入行 */
         CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,
-            8, H-66, 112, 22, hwnd, (HMENU)IDC_EXTDLG_EXT, hInst, NULL);
+            S(8), H-S(66), S(112), S(22), hwnd, (HMENU)IDC_EXTDLG_EXT, hInst, NULL);
         CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,
-            124, H-66, W-124-86-8, 22, hwnd, (HMENU)IDC_EXTDLG_PROC, hInst, NULL);
+            S(124), H-S(66), W-S(124)-S(86)-S(8), S(22), hwnd, (HMENU)IDC_EXTDLG_PROC, hInst, NULL);
         CreateWindowW(L"BUTTON", L"添加",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            W-82, H-66, 74, 22, hwnd, (HMENU)IDC_EXTDLG_ADD, hInst, NULL);
+            W-S(82), H-S(66), S(74), S(22), hwnd, (HMENU)IDC_EXTDLG_ADD, hInst, NULL);
         /* 底部按钮行 */
         CreateWindowW(L"BUTTON", L"删除选中",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            8, H-36, 90, 26, hwnd, (HMENU)IDC_EXTDLG_DEL, hInst, NULL);
+            S(8), H-S(36), S(90), S(26), hwnd, (HMENU)IDC_EXTDLG_DEL, hInst, NULL);
         CreateWindowW(L"BUTTON", L"确定",
-            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON|BS_DEFPUSHBUTTON,
-            W-90, H-36, 82, 26, hwnd, (HMENU)IDC_EXTDLG_OK, hInst, NULL);
-        /* 字体 */
-        HWND hc = GetWindow(hwnd, GW_CHILD);
-        while (hc) { SendMessageW(hc, WM_SETFONT, (WPARAM)hF, FALSE); hc = GetWindow(hc, GW_HWNDNEXT); }
+            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+            W-S(90), H-S(36), S(82), S(26), hwnd, (HMENU)IDC_EXTDLG_OK, hInst, NULL);
+        apply_font_to_children(hwnd, make_gui_font(), &g_extdlg_font);
+        /* 对 ListView 子控件也设字体 */
+        SendMessageW(hList, WM_SETFONT, (WPARAM)g_extdlg_font, FALSE);
         break;
     }
     case WM_COMMAND: {
@@ -927,7 +992,29 @@ static LRESULT CALLBACK ExtMapDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
     }
+    case WM_DPICHANGED: {
+        g_dpi = HIWORD(wp);
+        apply_font_to_children(hwnd, make_gui_font(), &g_extdlg_font);
+        const RECT *r = (const RECT *)lp;
+        SetWindowPos(hwnd, NULL, r->left, r->top,
+                     r->right - r->left, r->bottom - r->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) {
+            DestroyWindow(hwnd);
+        } else if (wp == VK_RETURN) {
+            HWND hFocus = GetFocus();
+            if (hFocus == GetDlgItem(hwnd, IDC_EXTDLG_OK)) {
+                DestroyWindow(hwnd);
+            } else {
+                SendMessageW(hwnd, WM_COMMAND, IDC_EXTDLG_ADD, 0);
+            }
+        }
+        return 0;
     case WM_DESTROY:
+        if (g_extdlg_font) { DeleteObject(g_extdlg_font); g_extdlg_font = NULL; }
         break;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -947,7 +1034,7 @@ void show_ext_map_dialog(HWND parent) {
         registered = TRUE;
     }
     RECT pr; GetWindowRect(parent, &pr);
-    RECT dr = {0,0,EXTDLG_W,EXTDLG_H};
+    RECT dr = {0,0,S(EXTDLG_W),S(EXTDLG_H)};
     AdjustWindowRect(&dr, WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU, FALSE);
     int dw = dr.right-dr.left, dh = dr.bottom-dr.top;
     int dx = pr.left + (pr.right-pr.left-dw)/2;
@@ -960,13 +1047,14 @@ void show_ext_map_dialog(HWND parent) {
     EnableWindow(parent, FALSE);
     MSG msg;
     while (IsWindow(hdlg) && GetMessageW(&msg, NULL, 0, 0)) {
-        if (msg.message == WM_KEYDOWN &&
-            (msg.wParam == VK_ESCAPE || msg.wParam == VK_RETURN)) {
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
             DestroyWindow(hdlg);
             break;
         }
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        if (!IsDialogMessage(hdlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
     EnableWindow(parent, TRUE);
     SetForegroundWindow(parent);

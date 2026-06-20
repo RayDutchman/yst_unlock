@@ -18,6 +18,11 @@
 
 #include "decrypt.h"
 
+/* ── 亿赛通加密文件头魔数 ────────────────────────────────── */
+/* 字节 1-3: 14 23 65 (第一个字节编码文件类型, 如 0x62=PNG 0x63=PDF),
+   偏移 12 处有 "E-SafeNet" */
+static const BYTE YST_MAGIC[3] = { 0x14, 0x23, 0x65 };
+
 /* ── 跳过规则静态数据 ────────────────────────────────────── */
 
 static const wchar_t *SKIP_DIRS[] = {
@@ -379,6 +384,34 @@ static void collect_files(wchar_t **paths, int n, FileList *fl) {
     }
 }
 
+/* ── 亿赛通加密文件检测 ──────────────────────────────────── */
+/* 读取前 20 字节，检查 CDG 加密文件头签名：
+ *   字节 1-3 : 14 23 65  (魔数, 第一个字节为文件类型码)
+ *   字节12-19: "E-SafeNet"  (供应商标记)
+ *
+ * 同时满足则判定为已加密，否则视为未加密。
+ */
+BOOL is_file_encrypted(const wchar_t *path) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    BYTE buf[20];
+    DWORD rd;
+    BOOL encrypted = FALSE;
+
+    if (ReadFile(h, buf, sizeof(buf), &rd, NULL) && rd == sizeof(buf)) {
+        if (memcmp(buf + 1, YST_MAGIC, 3) == 0 &&
+            memcmp(buf + 12, "E-SafeNet", 8) == 0) {
+            encrypted = TRUE;
+        }
+    }
+
+    CloseHandle(h);
+    return encrypted;
+}
+
 /* ── Worker 子进程模式 ───────────────────────────────────────── */
 
 #define COPY_BUF_SIZE (4 * 1024 * 1024)
@@ -563,8 +596,11 @@ static BOOL send_task(WorkerProc *wp,
         free(src_u8); free(dst_u8);
         strncpy(err_out, "out of memory", err_len-1); return FALSE;
     }
-    WideCharToMultiByte(CP_UTF8, 0, src, -1, src_u8, su, NULL, NULL);
-    WideCharToMultiByte(CP_UTF8, 0, dst, -1, dst_u8, du, NULL, NULL);
+    if (!WideCharToMultiByte(CP_UTF8, 0, src, -1, src_u8, su, NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, 0, dst, -1, dst_u8, du, NULL, NULL)) {
+        free(src_u8); free(dst_u8);
+        strncpy(err_out, "utf8 encode failed", err_len-1); return FALSE;
+    }
 
     int lu = su + du + 4;
     char *line = (char*)malloc(lu);
@@ -574,6 +610,7 @@ static BOOL send_task(WorkerProc *wp,
     }
     int n = snprintf(line, lu, "%s\t%s\n", src_u8, dst_u8);
     free(src_u8); free(dst_u8);
+    if (n <= 0) { free(line); strncpy(err_out, "format line failed", err_len-1); return FALSE; }
     DWORD written;
     BOOL pipe_ok = WriteFile(wp->hStdin_W, line, (DWORD)n, &written, NULL);
     free(line);
@@ -621,7 +658,7 @@ typedef struct {
     HWND      notify_hwnd;
 } DecryptArgs;
 
-#define NOTIFY_LOG(hwnd, s)   PostMessageW((hwnd), WM_WORKER_LOG,  0, (LPARAM)_wcsdup(s))
+#define NOTIFY_LOG(hwnd, s)   do { wchar_t *_s = _wcsdup(s); if (!_s || !PostMessageW((hwnd), WM_WORKER_LOG, 0, (LPARAM)_s)) free(_s); } while(0)
 #define NOTIFY_PROG(hwnd, v)  PostMessageW((hwnd), WM_WORKER_PROG, (WPARAM)(int)(v), 0)
 #define NOTIFY_DONE(hwnd, ok) PostMessageW((hwnd), WM_WORKER_DONE, (WPARAM)(ok), 0)
 
@@ -696,9 +733,26 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
 
     wchar_t fallback_exts[MAX_FALLBACK_EXTS][32];
     int fallback_ext_cnt = 0;
+    wchar_t processed_exts[MAX_FALLBACK_EXTS][32];
+    int processed_ext_cnt = 0;
 
     for (int idx = 0; idx < fl.count; idx++) {
         const wchar_t *src = fl.items[idx];
+
+        /* 收集已处理文件的扩展名 */
+        {
+            const wchar_t *dot = wcsrchr(src, L'.');
+            if (dot && processed_ext_cnt < MAX_FALLBACK_EXTS) {
+                wchar_t ext_lower[32];
+                wcsncpy(ext_lower, dot, 31); ext_lower[31] = 0;
+                wcs_lower(ext_lower);
+                BOOL found = FALSE;
+                for (int ei = 0; ei < processed_ext_cnt; ei++)
+                    if (wcscmp(processed_exts[ei], ext_lower) == 0) { found = TRUE; break; }
+                if (!found)
+                    wcsncpy(processed_exts[processed_ext_cnt++], ext_lower, 31);
+            }
+        }
 
         /* 确定进程名：映射表 > 注册表 > 兜底 */
         wchar_t proc_name[MAX_PATH_LEN];
@@ -796,6 +850,8 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
                             GetFileTime(hTimeSrc, &ft_create, &ft_access, &ft_write);
             if (hTimeSrc != INVALID_HANDLE_VALUE) CloseHandle(hTimeSrc);
 
+            /* 只读文件无法直接替换，先清除只读属性 */
+            SetFileAttributesW(src, FILE_ATTRIBUTE_NORMAL);
             if (!MoveFileExW(dst, src, MOVEFILE_REPLACE_EXISTING)) {
                 DWORD e = GetLastError();
                 snprintf(err, 512, "替换原文件失败 (%lu)", e);
@@ -819,7 +875,7 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
             fail_count++;
             wchar_t werr[512] = {0};
             MultiByteToWideChar(CP_UTF8, 0, err, -1, werr, 512);
-            _snwprintf(buf, 1023, L"[%d/%d] 失败 [%s]: %s \xe2\x80\x94 %s",
+            _snwprintf(buf, 1023, L"[%d/%d] 失败 [%s]: %s \u2014 %s",
                        idx+1, total, proc_name, fname, werr);
             buf[1023] = 0;
         }
@@ -847,6 +903,19 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
         for (int ei = 0; ei < fallback_ext_cnt; ei++) {
             if (ei > 0) wcsncat(extline, L"  ", sizeof(extline)/sizeof(wchar_t) - wcslen(extline) - 1);
             wcsncat(extline, fallback_exts[ei], sizeof(extline)/sizeof(wchar_t) - wcslen(extline) - 1);
+        }
+        NOTIFY_LOG(hwnd, extline);
+    }
+    if (processed_ext_cnt > 0) {
+        wchar_t hint[128];
+        _snwprintf(hint, 127, L"[提示] 以下扩展名的文件已处理：");
+        hint[127] = 0;
+        NOTIFY_LOG(hwnd, hint);
+        wchar_t extline[MAX_FALLBACK_EXTS * 34];
+        extline[0] = L' '; extline[1] = L' '; extline[2] = 0;
+        for (int ei = 0; ei < processed_ext_cnt; ei++) {
+            if (ei > 0) wcsncat(extline, L"  ", sizeof(extline)/sizeof(wchar_t) - wcslen(extline) - 1);
+            wcsncat(extline, processed_exts[ei], sizeof(extline)/sizeof(wchar_t) - wcslen(extline) - 1);
         }
         NOTIFY_LOG(hwnd, extline);
     }
