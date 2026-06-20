@@ -18,10 +18,8 @@
 
 #include "decrypt.h"
 
-/* ── 亿赛通加密文件头魔数 ────────────────────────────────── */
-/* 字节 1-3: 14 23 65 (第一个字节编码文件类型, 如 0x62=PNG 0x63=PDF),
-   偏移 12 处有 "E-SafeNet" */
-static const BYTE YST_MAGIC[3] = { 0x14, 0x23, 0x65 };
+/* ── 亿赛通供应商标记偏移 ────────────────────────────────── */
+/* 字节 12-20 处有 "E-SafeNet" 供应商标记，是亿赛通加密文件独有特征 */
 
 /* ── 跳过规则静态数据 ────────────────────────────────────── */
 
@@ -385,11 +383,8 @@ static void collect_files(wchar_t **paths, int n, FileList *fl) {
 }
 
 /* ── 亿赛通加密文件检测 ──────────────────────────────────── */
-/* 读取前 20 字节，检查 CDG 加密文件头签名：
- *   字节 1-3 : 14 23 65  (魔数, 第一个字节为文件类型码)
- *   字节12-19: "E-SafeNet"  (供应商标记)
- *
- * 同时满足则判定为已加密，否则视为未加密。
+/* 读取前 24 字节，检查偏移 12 处是否存在亿赛通独有供应商标记
+ * "E-SafeNet"，存在则判定为已加密。
  */
 BOOL is_file_encrypted(const wchar_t *path) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
@@ -397,13 +392,12 @@ BOOL is_file_encrypted(const wchar_t *path) {
     if (h == INVALID_HANDLE_VALUE)
         return FALSE;
 
-    BYTE buf[20];
+    BYTE buf[24];
     DWORD rd;
     BOOL encrypted = FALSE;
 
     if (ReadFile(h, buf, sizeof(buf), &rd, NULL) && rd == sizeof(buf)) {
-        if (memcmp(buf + 1, YST_MAGIC, 3) == 0 &&
-            memcmp(buf + 12, "E-SafeNet", 8) == 0) {
+        if (memcmp(buf + 12, "E-SafeNet", 9) == 0) {
             encrypted = TRUE;
         }
     }
@@ -739,7 +733,20 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
     for (int idx = 0; idx < fl.count; idx++) {
         const wchar_t *src = fl.items[idx];
 
-        /* 收集已处理文件的扩展名 */
+        /* 跳过未加密的文件 */
+        if (!is_file_encrypted(src)) {
+            const wchar_t *fname = wcsrchr(src, L'\\');
+            if (!fname) fname = src; else fname++;
+            wchar_t buf[1024];
+            _snwprintf(buf, 1023, L"[%d/%d] 跳过 [未加密]: %s",
+                       idx+1, fl.count, fname);
+            buf[1023] = 0;
+            NOTIFY_LOG(hwnd, buf);
+            NOTIFY_PROG(hwnd, (idx+1)*100/fl.count);
+            continue;
+        }
+
+        /* 收集加密文件扩展名 */
         {
             const wchar_t *dot = wcsrchr(src, L'.');
             if (dot && processed_ext_cnt < MAX_FALLBACK_EXTS) {
@@ -908,7 +915,7 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
     }
     if (processed_ext_cnt > 0) {
         wchar_t hint[128];
-        _snwprintf(hint, 127, L"[提示] 以下扩展名的文件已处理：");
+        _snwprintf(hint, 127, L"[提示] 以下扩展名的文件检测到加密状态，已处理：");
         hint[127] = 0;
         NOTIFY_LOG(hwnd, hint);
         wchar_t extline[MAX_FALLBACK_EXTS * 34];
