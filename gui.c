@@ -170,11 +170,11 @@ void run_progress_window(wchar_t **paths, int n) {
 /* ── 主窗口：布局常量 ─────────────────────────────────────── */
 
 /* 初始客户区尺寸（WM_CREATE 用，WM_SIZE 按实际尺寸重算） */
-#define GUI_CLIENT_W   540
-#define GUI_CLIENT_H   568
+#define GUI_CLIENT_W   500
+#define GUI_CLIENT_H   560
 /* 最小客户区尺寸 */
-#define GUI_MIN_CW     480
-#define GUI_MIN_CH     470
+#define GUI_MIN_CW     400
+#define GUI_MIN_CH     560
 
 /* 边距与尺寸 */
 #define LAYOUT_P       8    /* 外边距 */
@@ -495,9 +495,9 @@ static void layout_main_window(HWND hwnd, int cw, int ch,
     SetWindowPos(GetDlgItem(hwnd, IDC_STATIC_EXTMAP_LBL), NULL,
         P+8,         y+72, 72,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
     SetWindowPos(GetDlgItem(hwnd, IDC_LIST_EXT_MAP), NULL,
-        P+84,        y+72, 180, EH, SWP_NOZORDER|SWP_NOACTIVATE);
+        P+84,        y+72, 160, EH, SWP_NOZORDER|SWP_NOACTIVATE);
     SetWindowPos(GetDlgItem(hwnd, IDC_BTN_EXT_MAP), NULL,
-        P+84+180+4,  y+72, 60,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
+        P+84+160+4,  y+72, 60,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
     /* 行4 y+98 */
     SetWindowPos(GetDlgItem(hwnd, IDC_STATIC_FALLBACK_LBL), NULL,
         P+8,    y+98, 72,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
@@ -816,8 +816,8 @@ void run_main_gui(wchar_t **init_paths, int n) {
 
 /* ── 扩展名映射管理对话框 ─────────────────────────────────────── */
 
-#define EXTDLG_W 320
-#define EXTDLG_H 320
+#define EXTDLG_W 330
+#define EXTDLG_H 360
 #define IDC_EXTDLG_LIST   201
 #define IDC_EXTDLG_EXT    202
 #define IDC_EXTDLG_PROC   203
@@ -870,7 +870,7 @@ static LRESULT CALLBACK ExtMapDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             8, H-66, 112, 22, hwnd, (HMENU)IDC_EXTDLG_EXT, hInst, NULL);
         CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,
-            124, H-66, W-114-86-8, 22, hwnd, (HMENU)IDC_EXTDLG_PROC, hInst, NULL);
+            124, H-66, W-124-86-8, 22, hwnd, (HMENU)IDC_EXTDLG_PROC, hInst, NULL);
         CreateWindowW(L"BUTTON", L"添加",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
             W-82, H-66, 74, 22, hwnd, (HMENU)IDC_EXTDLG_ADD, hInst, NULL);
