@@ -249,10 +249,10 @@ static void create_config_group(HWND hwnd, HINSTANCE hInst,
         P+8, y+72, 72, EH, hwnd, (HMENU)IDC_STATIC_EXTMAP_LBL, hInst, NULL);
     CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"已配置 0 条映射",
         WS_CHILD|WS_VISIBLE|ES_READONLY,
-        P+84, y+72, 180, EH, hwnd, (HMENU)IDC_LIST_EXT_MAP, hInst, NULL);
+        P+84, y+72, 160, EH, hwnd, (HMENU)IDC_LIST_EXT_MAP, hInst, NULL);
     CreateWindowW(L"BUTTON", L"管理...",
         WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-        P+84+180+4, y+72, 60, EH, hwnd, (HMENU)IDC_BTN_EXT_MAP, hInst, NULL);
+        P+84+160+4, y+72, 60, EH, hwnd, (HMENU)IDC_BTN_EXT_MAP, hInst, NULL);
 
     /* 行4 y+98：兜底进程名 */
     CreateWindowW(L"STATIC", L"兜底进程名:",
@@ -816,7 +816,7 @@ void run_main_gui(wchar_t **init_paths, int n) {
 
 /* ── 扩展名映射管理对话框 ─────────────────────────────────────── */
 
-#define EXTDLG_W 440
+#define EXTDLG_W 320
 #define EXTDLG_H 320
 #define IDC_EXTDLG_LIST   201
 #define IDC_EXTDLG_EXT    202
@@ -847,7 +847,7 @@ static LRESULT CALLBACK ExtMapDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         int W = EXTDLG_W, H = EXTDLG_H;
         HWND hList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
             WS_CHILD|WS_VISIBLE|LVS_REPORT|LVS_SINGLESEL|LVS_SHOWSELALWAYS,
-            8, 8, W-16, H-110, hwnd, (HMENU)IDC_EXTDLG_LIST, hInst, NULL);
+            8, 8, W-16, H-98, hwnd, (HMENU)IDC_EXTDLG_LIST, hInst, NULL);
         SendMessageW(hList, WM_SETFONT, (WPARAM)hF, FALSE);
         LVCOLUMNW col = {0};
         col.mask = LVCF_TEXT|LVCF_WIDTH;
@@ -860,27 +860,27 @@ static LRESULT CALLBACK ExtMapDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         /* 标签行 */
         CreateWindowW(L"STATIC", L"扩展名（如 .xlsx）",
             WS_CHILD|WS_VISIBLE|SS_LEFT,
-            8, H-100, 140, 18, hwnd, NULL, hInst, NULL);
+            8, H-84, 110, 18, hwnd, NULL, hInst, NULL);
         CreateWindowW(L"STATIC", L"进程名（如 EXCEL.EXE）",
             WS_CHILD|WS_VISIBLE|SS_LEFT,
-            154, H-100, 200, 18, hwnd, NULL, hInst, NULL);
+            124, H-84, 140, 18, hwnd, NULL, hInst, NULL);
         /* 输入行 */
         CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,
-            8, H-78, 140, 22, hwnd, (HMENU)IDC_EXTDLG_EXT, hInst, NULL);
+            8, H-66, 112, 22, hwnd, (HMENU)IDC_EXTDLG_EXT, hInst, NULL);
         CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,
-            154, H-78, W-154-86-8, 22, hwnd, (HMENU)IDC_EXTDLG_PROC, hInst, NULL);
+            124, H-66, W-114-86-8, 22, hwnd, (HMENU)IDC_EXTDLG_PROC, hInst, NULL);
         CreateWindowW(L"BUTTON", L"添加",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            W-82, H-78, 74, 22, hwnd, (HMENU)IDC_EXTDLG_ADD, hInst, NULL);
+            W-82, H-66, 74, 22, hwnd, (HMENU)IDC_EXTDLG_ADD, hInst, NULL);
         /* 底部按钮行 */
         CreateWindowW(L"BUTTON", L"删除选中",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            8, H-48, 90, 26, hwnd, (HMENU)IDC_EXTDLG_DEL, hInst, NULL);
+            8, H-36, 90, 26, hwnd, (HMENU)IDC_EXTDLG_DEL, hInst, NULL);
         CreateWindowW(L"BUTTON", L"确定",
             WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON|BS_DEFPUSHBUTTON,
-            W-90, H-48, 82, 26, hwnd, (HMENU)IDC_EXTDLG_OK, hInst, NULL);
+            W-90, H-36, 82, 26, hwnd, (HMENU)IDC_EXTDLG_OK, hInst, NULL);
         /* 字体 */
         HWND hc = GetWindow(hwnd, GW_CHILD);
         while (hc) { SendMessageW(hc, WM_SETFONT, (WPARAM)hF, FALSE); hc = GetWindow(hc, GW_HWNDNEXT); }
