@@ -733,7 +733,11 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
     for (int idx = 0; idx < fl.count; idx++) {
         const wchar_t *src = fl.items[idx];
 
-        /* 跳过未加密的文件 */
+        /* 跳过未加密的文件
+         * is_file_encrypted() 在父进程（非白名单）中用 CreateFileW
+         * 读取文件头，检查偏移 12 处是否存在 "E-SafeNet" 供应商标记。
+         * 在安装了亿赛通的机器上实测验证：驱动对非白名单进程读文件
+         * 不会透明解密，读到的仍是加密头，E-SafeNet 检测可靠。 */
         if (!is_file_encrypted(src)) {
             const wchar_t *fname = wcsrchr(src, L'\\');
             if (!fname) fname = src; else fname++;
