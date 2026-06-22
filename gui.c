@@ -71,6 +71,7 @@ static HWND     g_prog_status = NULL;
 static HWND     g_prog_btn    = NULL;
 static UINT_PTR g_prog_timer  = 0;
 static HANDLE   g_prog_thread = NULL;
+static HANDLE   g_prog_stop_event = NULL;
 static HFONT    g_prog_font   = NULL;  /* 进度窗口字体（WM_DPICHANGED 时重建） */
 
 /* ── 进度窗口 ─────────────────────────────────────────────── */
@@ -101,7 +102,8 @@ static LRESULT CALLBACK ProgressWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     case WM_TIMER:
         if (wp == 1) {
             KillTimer(hwnd, 1);
-            g_prog_thread = start_decrypt_thread(hwnd, g_paths, g_path_cnt, NULL, NULL, NULL);
+            g_prog_stop_event = NULL;
+            g_prog_thread = start_decrypt_thread(hwnd, g_paths, g_path_cnt, NULL, NULL, NULL, &g_prog_stop_event);
             if (!g_prog_thread) {
                 SetWindowTextW(g_prog_status, L"启动解密线程失败");
                 EnableWindow(g_prog_btn, TRUE);
@@ -135,23 +137,28 @@ static LRESULT CALLBACK ProgressWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         return 0;
     case WM_CLOSE:
         if (g_prog_thread) {
-            ULONGLONG deadline = GetTickCount64() + 5000;
+            /* 先发停止信号，让解密线程自行清理 worker 子进程 */
+            if (g_prog_stop_event) SetEvent(g_prog_stop_event);
+            /* 等待线程自行退出（最长 30 秒，保障 worker 子进程被回收） */
+            ULONGLONG deadline = GetTickCount64() + 30000;
             while (WaitForSingleObject(g_prog_thread, 0) == WAIT_TIMEOUT) {
-                if (GetTickCount64() >= deadline) {
-                    TerminateThread(g_prog_thread, 0);
-                    break;
+                if (GetTickCount64() >= deadline) break;
+                /* 用 MsgWaitForMultipleObjects 同时等线程和消息，避免界面卡死 */
+                DWORD wr = MsgWaitForMultipleObjects(1, &g_prog_thread, FALSE,
+                                                      100, QS_ALLINPUT);
+                if (wr == WAIT_OBJECT_0 + 1) {
+                    MSG m;
+                    while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
+                        if (m.message == WM_QUIT) { PostQuitMessage((int)m.wParam); goto close_done; }
+                        TranslateMessage(&m); DispatchMessageW(&m);
+                    }
                 }
-                MSG m;
-                while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
-                    if (m.message == WM_QUIT) { PostQuitMessage((int)m.wParam); goto close_done_wait; }
-                    TranslateMessage(&m); DispatchMessageW(&m);
-                }
-                Sleep(20);
             }
-            close_done_wait:
+            close_done:
             CloseHandle(g_prog_thread);
             g_prog_thread = NULL;
         }
+        if (g_prog_stop_event) { CloseHandle(g_prog_stop_event); g_prog_stop_event = NULL; }
         DestroyWindow(hwnd);
         return 0;
     case WM_COMMAND:
@@ -383,7 +390,9 @@ static void listbox_add_path(HWND hListBox, const wchar_t *path) {
     for (int j = 0; j < g_path_cnt; j++)
         if (wcscmp(g_paths[j], path) == 0) { dup = TRUE; break; }
     if (!dup && g_path_cnt < MAX_PATHS) {
-        g_paths[g_path_cnt++] = _wcsdup(path);
+        wchar_t *dup = _wcsdup(path);
+        if (!dup) return;
+        g_paths[g_path_cnt++] = dup;
         SendMessageW(hListBox, LB_ADDSTRING, 0, (LPARAM)path);
     }
 }
@@ -459,6 +468,7 @@ static void on_btn_decrypt(HWND hwnd,
 
     wchar_t fallback_buf[MAX_PATH_LEN];
     wcsncpy(fallback_buf, g_fallback_proc, MAX_PATH_LEN-1);
+    fallback_buf[MAX_PATH_LEN-1] = 0;
     if (!fallback_buf[0]) wcscpy(fallback_buf, L"POWERPNT.EXE");
     wchar_t out_buf[MAX_PATH_LEN] = {0};
     GetWindowTextW(g_hwndOutDir, out_buf, MAX_PATH_LEN);
@@ -483,7 +493,8 @@ static void on_btn_decrypt(HWND hwnd,
     HANDLE ht = start_decrypt_thread(hwnd, g_paths, g_path_cnt,
                          proc_buf[0] ? proc_buf : NULL,
                          fallback_buf,
-                         out_buf[0] ? out_buf : NULL);
+                         out_buf[0] ? out_buf : NULL,
+                         NULL);
     if (ht) CloseHandle(ht);
     else {
         *is_decrypting = FALSE;
@@ -740,7 +751,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (id == IDC_BTN_BROWSE) {
             on_btn_browse(hwnd, g_hwndOutDir);
         } else if (id == IDC_EDIT_FALLBACK &&
-                   (HIWORD(wp) == EN_KILLFOCUS || HIWORD(wp) == EN_CHANGE)) {
+                   HIWORD(wp) == EN_KILLFOCUS) {
             HWND hFb = GetDlgItem(hwnd, IDC_EDIT_FALLBACK);
             GetWindowTextW(hFb, g_fallback_proc, MAX_PATH_LEN);
             if (!g_fallback_proc[0]) wcscpy(g_fallback_proc, L"POWERPNT.EXE");
@@ -866,7 +877,9 @@ void run_main_gui(wchar_t **init_paths, int n) {
     if (init_paths) {
         for (int i = 0; i < n; i++) {
             if (g_path_cnt < MAX_PATHS) {
-                g_paths[g_path_cnt++] = _wcsdup(init_paths[i]);
+                wchar_t *dup = _wcsdup(init_paths[i]);
+                if (!dup) continue;
+                g_paths[g_path_cnt++] = dup;
                 SendMessageW(g_hwndList, LB_ADDSTRING, 0, (LPARAM)init_paths[i]);
             }
         }
@@ -902,6 +915,45 @@ static void extdlg_refresh_list(HWND hList) {
         lvi.pszText = g_ext_map[i].ext;
         ListView_InsertItem(hList, &lvi);
         ListView_SetItemText(hList, i, 1, g_ext_map[i].proc);
+    }
+}
+
+static void extdlg_reposition_children(HWND hwnd) {
+    int W = S(EXTDLG_W), H = S(EXTDLG_H);
+    HWND hList = GetDlgItem(hwnd, IDC_EXTDLG_LIST);
+    if (hList) {
+        SetWindowPos(hList, NULL, S(8), S(8), W-S(16), H-S(98), SWP_NOZORDER);
+        ListView_SetColumnWidth(hList, 0, S(120));
+        ListView_SetColumnWidth(hList, 1, W-S(16)-S(120)-S(4));
+    }
+    /* 子控件按 Z-order 遍历定位（两个 STATIC 无 ID，无法用 GetDlgItem） */
+    HWND hChild = GetWindow(hList, GW_HWNDNEXT);
+    if (hChild) {
+        SetWindowPos(hChild, NULL, S(8), H-S(84), S(110), S(18), SWP_NOZORDER);
+        hChild = GetWindow(hChild, GW_HWNDNEXT);
+    }
+    if (hChild) {
+        SetWindowPos(hChild, NULL, S(124), H-S(84), S(140), S(18), SWP_NOZORDER);
+        hChild = GetWindow(hChild, GW_HWNDNEXT);
+    }
+    if (hChild) {
+        SetWindowPos(hChild, NULL, S(8), H-S(66), S(112), S(22), SWP_NOZORDER);
+        hChild = GetWindow(hChild, GW_HWNDNEXT);
+    }
+    if (hChild) {
+        SetWindowPos(hChild, NULL, S(124), H-S(66), W-S(124)-S(86)-S(8), S(22), SWP_NOZORDER);
+        hChild = GetWindow(hChild, GW_HWNDNEXT);
+    }
+    if (hChild) {
+        SetWindowPos(hChild, NULL, W-S(82), H-S(66), S(74), S(22), SWP_NOZORDER);
+        hChild = GetWindow(hChild, GW_HWNDNEXT);
+    }
+    if (hChild) {
+        SetWindowPos(hChild, NULL, S(8), H-S(36), S(90), S(26), SWP_NOZORDER);
+        hChild = GetWindow(hChild, GW_HWNDNEXT);
+    }
+    if (hChild) {
+        SetWindowPos(hChild, NULL, W-S(90), H-S(36), S(82), S(26), SWP_NOZORDER);
     }
 }
 
@@ -949,6 +1001,7 @@ static LRESULT CALLBACK ExtMapDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         apply_font_to_children(hwnd, make_gui_font(), &g_extdlg_font);
         /* 对 ListView 子控件也设字体 */
         SendMessageW(hList, WM_SETFONT, (WPARAM)g_extdlg_font, FALSE);
+        extdlg_reposition_children(hwnd);
         break;
     }
     case WM_COMMAND: {
@@ -966,12 +1019,15 @@ static LRESULT CALLBACK ExtMapDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             for (int i=0; i<g_ext_map_cnt; i++) {
                 if (wcscmp(g_ext_map[i].ext, ext_norm)==0) {
                     wcsncpy(g_ext_map[i].proc, proc, MAX_PATH_LEN-1);
+                    g_ext_map[i].proc[MAX_PATH_LEN-1] = 0;
                     updated = TRUE; break;
                 }
             }
             if (!updated && g_ext_map_cnt < MAX_EXT_MAP) {
                 wcsncpy(g_ext_map[g_ext_map_cnt].ext,  ext_norm, 31);
+                g_ext_map[g_ext_map_cnt].ext[31] = 0;
                 wcsncpy(g_ext_map[g_ext_map_cnt].proc, proc, MAX_PATH_LEN-1);
+                g_ext_map[g_ext_map_cnt].proc[MAX_PATH_LEN-1] = 0;
                 g_ext_map_cnt++;
             }
             save_ini();
@@ -999,6 +1055,7 @@ static LRESULT CALLBACK ExtMapDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetWindowPos(hwnd, NULL, r->left, r->top,
                      r->right - r->left, r->bottom - r->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
+        extdlg_reposition_children(hwnd);
         return 0;
     }
     case WM_KEYDOWN:
@@ -1047,10 +1104,6 @@ void show_ext_map_dialog(HWND parent) {
     EnableWindow(parent, FALSE);
     MSG msg;
     while (IsWindow(hdlg) && GetMessageW(&msg, NULL, 0, 0)) {
-        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
-            DestroyWindow(hdlg);
-            break;
-        }
         if (!IsDialogMessage(hdlg, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);

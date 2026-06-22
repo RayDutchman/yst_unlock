@@ -58,7 +58,8 @@ HANDLE start_decrypt_thread(HWND notify_hwnd,
                              wchar_t **paths, int path_cnt,
                              const wchar_t *proc_override,   /* NULL = 自动 */
                              const wchar_t *fallback_proc,   /* NULL = 用全局 */
-                             const wchar_t *output_dir);     /* NULL = 覆盖 */
+                             const wchar_t *output_dir,     /* NULL = 覆盖 */
+                             HANDLE *out_stop_event);       /* 非NULL则创建停止事件传出，接收方负责CloseHandle */
 
 /* ── Worker 子进程入口（--worker 模式） ─────────────────── */
 void worker_mode(void);

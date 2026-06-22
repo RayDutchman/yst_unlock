@@ -18,8 +18,12 @@
 
 #include "decrypt.h"
 
-/* ── 亿赛通供应商标记偏移 ────────────────────────────────── */
-/* 字节 12-20 处有 "E-SafeNet" 供应商标记，是亿赛通加密文件独有特征 */
+/* ── 亿赛通加密文件魔数 ────────────────────────────────── */
+/* 字节 1-3 处有固定魔数 14 23 65，所有加密文件均保留此特征。
+ * 字节 0 为文件类型码（0x62=PNG/其他, 0x63=PDF）。
+ * 偏移 12 处本应有 "E-SafeNet" 供应商标记（9字节），但在部分
+ * 文件中该标记可能被加密数据覆写（前 4-5 字节 "E-Saf" 尚存），
+ * 因此魔数是比 E-SafeNet 更可靠的判定依据。 */
 
 /* ── 跳过规则静态数据 ────────────────────────────────────── */
 
@@ -88,8 +92,10 @@ void init_ini_path(void) {
 void load_ini(void) {
     wchar_t buf[MAX_PATH_LEN];
     if (GetPrivateProfileStringW(L"Config", L"FallbackProc", L"POWERPNT.EXE",
-                                 buf, MAX_PATH_LEN, g_ini_path) > 0)
+                                 buf, MAX_PATH_LEN, g_ini_path) > 0) {
         wcsncpy(g_fallback_proc, buf, MAX_PATH_LEN-1);
+        g_fallback_proc[MAX_PATH_LEN-1] = 0;
+    }
 
     wchar_t *keys = (wchar_t*)calloc(8192, sizeof(wchar_t));
     if (!keys) return;
@@ -106,6 +112,7 @@ void load_ini(void) {
                     g_ext_map[g_ext_map_cnt].ext[elen] = 0;
                     wcs_lower(g_ext_map[g_ext_map_cnt].ext);
                     wcsncpy(g_ext_map[g_ext_map_cnt].proc, eq+1, MAX_PATH_LEN-1);
+                    g_ext_map[g_ext_map_cnt].proc[MAX_PATH_LEN-1] = 0;
                     g_ext_map_cnt++;
                 }
             }
@@ -164,14 +171,15 @@ static void extract_exe_name(const wchar_t *cmd, wchar_t *out, int outlen) {
 }
 
 static BOOL get_default_process_for_ext(const wchar_t *ext, wchar_t *out, int outlen) {
-    wchar_t *prog_id = (wchar_t*)calloc(512, sizeof(wchar_t));
-    wchar_t *uc_path = (wchar_t*)calloc(512, sizeof(wchar_t));
-    wchar_t *cmd_path= (wchar_t*)calloc(1024, sizeof(wchar_t));
-    wchar_t *cmd     = (wchar_t*)calloc(MAX_PATH_LEN, sizeof(wchar_t));
+    wchar_t *prog_id = (wchar_t*)malloc(512 * sizeof(wchar_t));
+    wchar_t *uc_path = (wchar_t*)malloc(512 * sizeof(wchar_t));
+    wchar_t *cmd_path= (wchar_t*)malloc(1024 * sizeof(wchar_t));
+    wchar_t *cmd     = (wchar_t*)malloc(MAX_PATH_LEN * sizeof(wchar_t));
     if (!prog_id || !uc_path || !cmd_path || !cmd) {
         free(prog_id); free(uc_path); free(cmd_path); free(cmd);
         return FALSE;
     }
+    prog_id[0] = 0; uc_path[0] = 0; cmd_path[0] = 0; cmd[0] = 0;
     BOOL result = FALSE;
 
     _snwprintf(uc_path, 511,
@@ -274,6 +282,7 @@ static BOOL should_skip_dir(const wchar_t *name) {
     if (name[0] == L'.' || name[0] == L'_') return TRUE;
     wchar_t lower[MAX_PATH_LEN];
     wcsncpy(lower, name, MAX_PATH_LEN - 1);
+    lower[MAX_PATH_LEN - 1] = 0;
     wcs_lower(lower);
     for (int i = 0; SKIP_DIRS[i]; i++)
         if (wcscmp(lower, SKIP_DIRS[i]) == 0) return TRUE;
@@ -310,9 +319,13 @@ static void filelist_init(FileList *fl) {
 static void filelist_push(FileList *fl, const wchar_t *path) {
     if (fl->count >= fl->capacity) {
         fl->capacity *= 2;
-        fl->items = (wchar_t**)realloc(fl->items, fl->capacity * sizeof(wchar_t*));
+        wchar_t **tmp = (wchar_t**)realloc(fl->items, fl->capacity * sizeof(wchar_t*));
+        if (!tmp) return;
+        fl->items = tmp;
     }
-    fl->items[fl->count++] = _wcsdup(path);
+    wchar_t *dup = _wcsdup(path);
+    if (!dup) return;
+    fl->items[fl->count++] = dup;
 }
 
 static void filelist_free(FileList *fl) {
@@ -326,7 +339,11 @@ static void walk_dir(const wchar_t *dir_root, FileList *fl) {
     int   head = 0, tail = 0;
     wchar_t **queue = (wchar_t**)malloc(cap * sizeof(wchar_t*));
     if (!queue) return;
-    queue[tail++] = _wcsdup(dir_root);
+    {
+        wchar_t *dir_copy = _wcsdup(dir_root);
+        if (!dir_copy) { free(queue); return; }
+        queue[tail++] = dir_copy;
+    }
 
     while (head < tail) {
         wchar_t *cur = queue[head++];
@@ -355,7 +372,9 @@ static void walk_dir(const wchar_t *dir_root, FileList *fl) {
                             }
                             queue = tmp;
                         }
-                        queue[tail++] = _wcsdup(full);
+                        wchar_t *dir_copy2 = _wcsdup(full);
+                        if (dir_copy2)
+                            queue[tail++] = dir_copy2;
                     }
                 } else {
                     if (!should_skip_file(full))
@@ -383,8 +402,10 @@ static void collect_files(wchar_t **paths, int n, FileList *fl) {
 }
 
 /* ── 亿赛通加密文件检测 ──────────────────────────────────── */
-/* 读取前 24 字节，检查偏移 12 处是否存在亿赛通独有供应商标记
- * "E-SafeNet"，存在则判定为已加密。
+/* 读取前 24 字节，检查字节 1-3 处是否存在亿赛通固定魔数
+ * 14 23 65。该魔数在所有加密文件中一致保留，而偏移 12 处的
+ * "E-SafeNet" 供应商标记在部分文件可能被加密数据部分覆写，
+ * 因此用魔数比用 E-SafeNet 更可靠。
  */
 BOOL is_file_encrypted(const wchar_t *path) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
@@ -397,7 +418,7 @@ BOOL is_file_encrypted(const wchar_t *path) {
     BOOL encrypted = FALSE;
 
     if (ReadFile(h, buf, sizeof(buf), &rd, NULL) && rd == sizeof(buf)) {
-        if (memcmp(buf + 12, "E-SafeNet", 9) == 0) {
+        if (memcmp(buf + 1, "\x14\x23\x65", 3) == 0) {
             encrypted = TRUE;
         }
     }
@@ -610,24 +631,17 @@ static BOOL send_task(WorkerProc *wp,
     free(line);
     if (!pipe_ok) { strncpy(err_out, "write to worker pipe failed", err_len-1); return FALSE; }
 
-    /* 批量读响应直到遇到 '\n'（响应格式：OK\n 或 ERR:...\n） */
+    /* 逐字节读响应直到 '\n'（避免分批读取时多响应粘连丢数据） */
     char resp[512] = {0};
     int ri = 0;
     while (ri < (int)sizeof(resp)-1) {
-        char buf[64]; DWORD rd = 0;
-        DWORD to_read = (DWORD)((sizeof(resp)-1) - (size_t)ri);
-        if (to_read > sizeof(buf)) to_read = (DWORD)sizeof(buf);
-        if (!ReadFile(wp->hStdout_R, buf, to_read, &rd, NULL) || rd == 0) {
+        char ch; DWORD rd;
+        if (!ReadFile(wp->hStdout_R, &ch, 1, &rd, NULL) || rd == 0) {
             strncpy(err_out, "worker pipe closed unexpectedly", err_len-1); return FALSE;
         }
-        /* 扫描本批数据，找到 '\n' 则截断 */
-        DWORD i;
-        for (i = 0; i < rd; i++) {
-            if (buf[i] == '\n') { goto resp_done; }
-            resp[ri++] = buf[i];
-        }
+        if (ch == '\n') break;
+        resp[ri++] = ch;
     }
-    resp_done:
     resp[ri] = 0;
     if (strcmp(resp, "OK") == 0) return TRUE;
     if (strncmp(resp, "ERR:", 4) == 0)
@@ -650,6 +664,7 @@ typedef struct {
     const ExtMapEntry *ext_map;
     int                ext_map_cnt;
     HWND      notify_hwnd;
+    HANDLE    hStopEvent;   /* 置信号时通知线程中断 */
 } DecryptArgs;
 
 #define NOTIFY_LOG(hwnd, s)   do { wchar_t *_s = _wcsdup(s); if (!_s || !PostMessageW((hwnd), WM_WORKER_LOG, 0, (LPARAM)_s)) free(_s); } while(0)
@@ -733,6 +748,13 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
     for (int idx = 0; idx < fl.count; idx++) {
         const wchar_t *src = fl.items[idx];
 
+        /* 检查停止信号 */
+        if (args->hStopEvent &&
+            WaitForSingleObject(args->hStopEvent, 0) == WAIT_OBJECT_0) {
+            NOTIFY_LOG(hwnd, L"[提示] 用户中断解密");
+            break;
+        }
+
         /* 跳过未加密的文件
          * is_file_encrypted() 在父进程（非白名单）中用 CreateFileW
          * 读取文件头，检查偏移 12 处是否存在 "E-SafeNet" 供应商标记。
@@ -760,8 +782,11 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
                 BOOL found = FALSE;
                 for (int ei = 0; ei < processed_ext_cnt; ei++)
                     if (wcscmp(processed_exts[ei], ext_lower) == 0) { found = TRUE; break; }
-                if (!found)
-                    wcsncpy(processed_exts[processed_ext_cnt++], ext_lower, 31);
+                if (!found) {
+                    wcsncpy(processed_exts[processed_ext_cnt], ext_lower, 31);
+                    processed_exts[processed_ext_cnt][31] = 0;
+                    processed_ext_cnt++;
+                }
             }
         }
 
@@ -777,6 +802,7 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
                 for (int mi=0; mi < args->ext_map_cnt; mi++) {
                     if (wcscmp(args->ext_map[mi].ext, ext2) == 0) {
                         wcsncpy(proc_name, args->ext_map[mi].proc, MAX_PATH_LEN-1);
+                        proc_name[MAX_PATH_LEN-1] = 0;
                         found_in_map = TRUE;
                         break;
                     }
@@ -793,10 +819,14 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
                 BOOL found = FALSE;
                 for (int ei = 0; ei < fallback_ext_cnt; ei++)
                     if (wcscmp(fallback_exts[ei], ext_lower) == 0) { found = TRUE; break; }
-                if (!found)
-                    wcsncpy(fallback_exts[fallback_ext_cnt++], ext_lower, 31);
+                if (!found) {
+                    wcsncpy(fallback_exts[fallback_ext_cnt], ext_lower, 31);
+                    fallback_exts[fallback_ext_cnt][31] = 0;
+                    fallback_ext_cnt++;
+                }
             }
             wcsncpy(proc_name, args->fallback_proc, MAX_PATH_LEN-1);
+            proc_name[MAX_PATH_LEN-1] = 0;
         }
 
         /* 查找或创建 worker */
@@ -807,6 +837,7 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
             if (worker_cnt < MAX_WORKERS) {
                 we = &workers[worker_cnt++];
                 wcsncpy(we->name, proc_name, MAX_PATH_LEN-1);
+                we->name[MAX_PATH_LEN-1] = 0;
                 memset(&we->wp, 0, sizeof(we->wp));
             }
         }
@@ -841,8 +872,20 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
             dst[MAX_PATH_LEN-1] = 0;
             wchar_t parent[MAX_PATH_LEN];
             wcsncpy(parent, dst, MAX_PATH_LEN-1);
+            parent[MAX_PATH_LEN-1] = 0;
             wchar_t *bs = wcsrchr(parent, L'\\');
-            if (bs) { *bs = 0; SHCreateDirectoryExW(NULL, parent, NULL); }
+            if (bs) {
+                *bs = 0;
+                DWORD shr = SHCreateDirectoryExW(NULL, parent, NULL);
+                if (shr != ERROR_SUCCESS && shr != ERROR_ALREADY_EXISTS
+                    && shr != ERROR_FILE_EXISTS) {
+                    wchar_t emsg2[MAX_PATH_LEN + 64];
+                    _snwprintf(emsg2, MAX_PATH_LEN+63, L"[错误] 创建输出子目录失败 (%lu): %s",
+                               shr, parent);
+                    emsg2[MAX_PATH_LEN+63] = 0;
+                    NOTIFY_LOG(hwnd, emsg2);
+                }
+            }
         } else {
             _snwprintf(dst, MAX_PATH_LEN-1, L"%s.yst_tmp", src);
             dst[MAX_PATH_LEN-1] = 0;
@@ -944,15 +987,22 @@ HANDLE start_decrypt_thread(HWND notify_hwnd,
                              wchar_t **paths, int path_cnt,
                              const wchar_t *proc_override,
                              const wchar_t *fallback_proc,
-                             const wchar_t *output_dir) {
+                             const wchar_t *output_dir,
+                             HANDLE *out_stop_event) {
     DecryptArgs *args = (DecryptArgs*)calloc(1, sizeof(DecryptArgs));
     if (!args) return NULL;
     args->notify_hwnd = notify_hwnd;
     args->path_cnt    = path_cnt;
     args->paths       = (wchar_t**)malloc(path_cnt * sizeof(wchar_t*));
     if (!args->paths) { free(args); return NULL; }
-    for (int i = 0; i < path_cnt; i++)
+    for (int i = 0; i < path_cnt; i++) {
         args->paths[i] = _wcsdup(paths[i]);
+        if (!args->paths[i]) {
+            for (int j = 0; j < i; j++) free(args->paths[j]);
+            free(args->paths); free(args);
+            return NULL;
+        }
+    }
     if (proc_override)
         wcsncpy(args->proc_override, proc_override, MAX_PATH_LEN-1);
     if (fallback_proc && fallback_proc[0])
@@ -963,8 +1013,16 @@ HANDLE start_decrypt_thread(HWND notify_hwnd,
     args->ext_map_cnt = g_ext_map_cnt;
     if (output_dir)
         wcsncpy(args->output_dir, output_dir, MAX_PATH_LEN-1);
+    if (out_stop_event) {
+        args->hStopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+        *out_stop_event = args->hStopEvent;
+    }
     HANDLE ht = CreateThread(NULL, 0, decrypt_thread, args, 0, NULL);
     if (!ht) {
+        if (out_stop_event && args->hStopEvent) {
+            CloseHandle(args->hStopEvent);
+            *out_stop_event = NULL;
+        }
         for (int i = 0; i < path_cnt; i++) free(args->paths[i]);
         free(args->paths);
         free(args);

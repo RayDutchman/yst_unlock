@@ -61,9 +61,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
         HANDLE hMutex = CreateMutexW(NULL, FALSE, L"YST_Unlock_SingleInstance");
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
             /* 后续实例：写入路径到临时目录后退出 */
-            wchar_t batch[MAX_PATH_LEN];
-            GetTempPathW(MAX_PATH_LEN, batch);
-            wcscat(batch, L"yst_unlock_batch\\");
+            wchar_t batch[MAX_PATH_LEN + 64];
+            {
+                wchar_t tmp2[MAX_PATH_LEN];
+                batch[0] = 0;
+                if (GetTempPathW(MAX_PATH_LEN, tmp2))
+                    _snwprintf(batch, MAX_PATH_LEN+63, L"%syst_unlock_batch\\", tmp2);
+            }
             CreateDirectoryW(batch, NULL);
             wchar_t tmp[MAX_PATH_LEN * 2];
             for (int i = 0; i < n; i++) {
@@ -77,22 +81,45 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
                     CloseHandle(hf);
                 }
             }
+            /* 通知首个实例有新文件到达 */
+            {
+                HANDLE hBatchEvent = CreateEventW(NULL, FALSE, FALSE, L"YST_Unlock_BatchEvent");
+                if (hBatchEvent) { SetEvent(hBatchEvent); CloseHandle(hBatchEvent); }
+            }
             CloseHandle(hMutex);
             LocalFree(argv);
             return 0;
         }
 
-        /* 首个实例：等待后续实例写入路径 */
-        Sleep(200);
+        /* 首个实例：创建批处理信号事件，等待后续实例结束写入
+         * 原理：
+         * - 首个实例创建事件，初始无信号
+         * - 后续实例写入路径文件后 SetEvent 通知
+         * - 首个实例 WaitForSingleObject() 等待信号，
+         *   最大等待 3 秒，信号触发后额外等 500ms 收尾
+         * 相比固定 Sleep(200) 的好处：系统负载高时不会竞争失败 */
+        HANDLE hBatchEvent = CreateEventW(NULL, FALSE, FALSE, L"YST_Unlock_BatchEvent");
+        {
+            int polls = 30;  /* 最长 30*100ms = 3s */
+            while (polls-- > 0) {
+                if (WaitForSingleObject(hBatchEvent, 100) == WAIT_OBJECT_0)
+                    polls = 5;  /* 有新文件到达，再等 500ms 收尾 */
+            }
+        }
+        CloseHandle(hBatchEvent);
 
         for (int i = 0; i < n; i++)
             g_paths[i] = argv[2 + i];
         int total = n;
 
         /* 读取后续实例写入的路径 */
-        wchar_t batch[MAX_PATH_LEN];
-        GetTempPathW(MAX_PATH_LEN, batch);
-        wcscat(batch, L"yst_unlock_batch\\");
+        wchar_t batch[MAX_PATH_LEN + 64];
+        {
+            wchar_t tmp2[MAX_PATH_LEN];
+            batch[0] = 0;
+            if (GetTempPathW(MAX_PATH_LEN, tmp2))
+                _snwprintf(batch, MAX_PATH_LEN+63, L"%syst_unlock_batch\\", tmp2);
+        }
         WIN32_FIND_DATAW fd;
         wchar_t pattern[MAX_PATH_LEN];
         _snwprintf(pattern, MAX_PATH_LEN - 1, L"%s*", batch);
@@ -111,7 +138,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
                     DWORD rd;
                     if (ReadFile(hr, path, sizeof(path) - 2, &rd, NULL) && rd >= 2) {
                         path[rd / sizeof(wchar_t)] = 0;
-                        g_paths[total++] = _wcsdup(path);
+                        wchar_t *dup_path = _wcsdup(path);
+                        if (dup_path) g_paths[total++] = dup_path;
                     }
                     CloseHandle(hr);
                 }
