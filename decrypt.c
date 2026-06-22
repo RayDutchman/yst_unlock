@@ -660,7 +660,6 @@ typedef struct {
     int       path_cnt;
     wchar_t   proc_override[MAX_PATH_LEN];
     wchar_t   fallback_proc[MAX_PATH_LEN];
-    wchar_t   output_dir[MAX_PATH_LEN];
     const ExtMapEntry *ext_map;
     int                ext_map_cnt;
     HWND      notify_hwnd;
@@ -712,28 +711,6 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
     if (!CreateDirectoryW(tmp_dir, NULL) &&
         GetLastError() != ERROR_ALREADY_EXISTS) {
         /* 临时目录创建失败，仍可继续（后续每个文件会失败并报错） */
-    }
-
-    wchar_t common_root[MAX_PATH_LEN] = {0};
-    if (args->output_dir[0]) {
-        if (args->path_cnt >= 1) {
-            wcsncpy(common_root, args->paths[0], MAX_PATH_LEN-1);
-            DWORD attr = GetFileAttributesW(common_root);
-            if (!(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-                wchar_t *bs = wcsrchr(common_root, L'\\');
-                if (bs) *bs = 0;
-            }
-        }
-        if (!CreateDirectoryW(args->output_dir, NULL) &&
-            GetLastError() != ERROR_ALREADY_EXISTS) {
-            wchar_t emsg[MAX_PATH_LEN + 64];
-            _snwprintf(emsg, MAX_PATH_LEN+63, L"[错误] 创建输出目录失败 (%lu): %s",
-                       GetLastError(), args->output_dir);
-            emsg[MAX_PATH_LEN+63] = 0;
-            NOTIFY_LOG(hwnd, emsg);
-            NOTIFY_DONE(hwnd, FALSE);
-            goto cleanup_args;
-        }
     }
 
     WorkerEntry workers[MAX_WORKERS];
@@ -861,41 +838,17 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
             }
         }
 
-        /* 确定输出路径 */
+        /* 确定临时文件路径（始终原位解密：写 .yst_tmp → 替换原文件） */
         wchar_t dst[MAX_PATH_LEN];
-        if (args->output_dir[0] && common_root[0]) {
-            const wchar_t *rel = src;
-            int cr_len = (int)wcslen(common_root);
-            if (wcsncmp(src, common_root, cr_len) == 0)
-                rel = src + cr_len + 1;
-            _snwprintf(dst, MAX_PATH_LEN-1, L"%s\\%s", args->output_dir, rel);
-            dst[MAX_PATH_LEN-1] = 0;
-            wchar_t parent[MAX_PATH_LEN];
-            wcsncpy(parent, dst, MAX_PATH_LEN-1);
-            parent[MAX_PATH_LEN-1] = 0;
-            wchar_t *bs = wcsrchr(parent, L'\\');
-            if (bs) {
-                *bs = 0;
-                DWORD shr = SHCreateDirectoryExW(NULL, parent, NULL);
-                if (shr != ERROR_SUCCESS && shr != ERROR_ALREADY_EXISTS
-                    && shr != ERROR_FILE_EXISTS) {
-                    wchar_t emsg2[MAX_PATH_LEN + 64];
-                    _snwprintf(emsg2, MAX_PATH_LEN+63, L"[错误] 创建输出子目录失败 (%lu): %s",
-                               shr, parent);
-                    emsg2[MAX_PATH_LEN+63] = 0;
-                    NOTIFY_LOG(hwnd, emsg2);
-                }
-            }
-        } else {
-            _snwprintf(dst, MAX_PATH_LEN-1, L"%s.yst_tmp", src);
-            dst[MAX_PATH_LEN-1] = 0;
-        }
+        _snwprintf(dst, MAX_PATH_LEN-1, L"%s.yst_tmp", src);
+        dst[MAX_PATH_LEN-1] = 0;
 
         /* 发送任务 */
         char err[512] = {0};
         BOOL ok = we ? send_task(&we->wp, src, dst, err, 512) : FALSE;
 
-        if (ok && !args->output_dir[0]) {
+        if (ok) {
+            /* 保留原文件时间戳 */
             HANDLE hTimeSrc = CreateFileW(src, FILE_READ_ATTRIBUTES,
                                           FILE_SHARE_READ, NULL, OPEN_EXISTING,
                                           FILE_FLAG_BACKUP_SEMANTICS, NULL);
@@ -914,7 +867,7 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
             } else if (got_time) {
                 preserve_file_time(src, &ft_create, &ft_access, &ft_write);
             }
-        } else if (!ok && !args->output_dir[0]) {
+        } else {
             DeleteFileW(dst);
         }
 
@@ -987,7 +940,6 @@ HANDLE start_decrypt_thread(HWND notify_hwnd,
                              wchar_t **paths, int path_cnt,
                              const wchar_t *proc_override,
                              const wchar_t *fallback_proc,
-                             const wchar_t *output_dir,
                              HANDLE *out_stop_event) {
     DecryptArgs *args = (DecryptArgs*)calloc(1, sizeof(DecryptArgs));
     if (!args) return NULL;
@@ -1011,8 +963,6 @@ HANDLE start_decrypt_thread(HWND notify_hwnd,
         wcsncpy(args->fallback_proc, g_fallback_proc, MAX_PATH_LEN-1);
     args->ext_map     = g_ext_map;
     args->ext_map_cnt = g_ext_map_cnt;
-    if (output_dir)
-        wcsncpy(args->output_dir, output_dir, MAX_PATH_LEN-1);
     if (out_stop_event) {
         args->hStopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
         *out_stop_event = args->hStopEvent;

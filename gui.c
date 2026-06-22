@@ -53,7 +53,7 @@ HWND g_hwndList      = NULL;
 HWND g_hwndLog       = NULL;
 HWND g_hwndProgress  = NULL;
 HWND g_hwndProcEdit  = NULL;
-HWND g_hwndOutDir    = NULL;
+
 HWND g_hwndBtnDecrypt= NULL;
 
 wchar_t **g_paths    = NULL;
@@ -103,7 +103,7 @@ static LRESULT CALLBACK ProgressWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         if (wp == 1) {
             KillTimer(hwnd, 1);
             g_prog_stop_event = NULL;
-            g_prog_thread = start_decrypt_thread(hwnd, g_paths, g_path_cnt, NULL, NULL, NULL, &g_prog_stop_event);
+            g_prog_thread = start_decrypt_thread(hwnd, g_paths, g_path_cnt, NULL, NULL, &g_prog_stop_event);
             if (!g_prog_thread) {
                 SetWindowTextW(g_prog_status, L"启动解密线程失败");
                 EnableWindow(g_prog_btn, TRUE);
@@ -247,7 +247,7 @@ void run_progress_window(wchar_t **paths, int n) {
 #define LAYOUT_BW      80   /* 普通按钮宽 */
 #define LAYOUT_BH      24   /* 普通按钮高 */
 #define LAYOUT_EH      22   /* Edit 高 */
-#define LAYOUT_CFG_H   124  /* 配置区固定高（4行，去掉 checkbox 行） */
+#define LAYOUT_CFG_H   98   /* 配置区固定高（3行：进程名/扩展名映射/兜底进程名） */
 
 static HFONT g_main_font = NULL;  /* 主窗口字体（WM_DPICHANGED 时重建） */
 
@@ -285,7 +285,8 @@ static void create_config_group(HWND hwnd, HINSTANCE hInst,
                                  int y, int gw, int iw,
                                  HWND *hGbCfg,
                                  HWND *hProcEdit,   HWND *hStaticProc,
-                                 HWND *hStaticOutLabel, HWND *hOutDir) {
+                                 HWND *hOutDir) {
+    (void)hOutDir;
     const int P = S(LAYOUT_P), EH = S(LAYOUT_EH);
     const int LW = S(72);   /* 标签宽，使 Edit 左边对齐：P+S(8)+LW+S(4) */
 
@@ -324,21 +325,6 @@ static void create_config_group(HWND hwnd, HINSTANCE hInst,
     CreateWindowW(L"STATIC", L"(注册表未命中时)",
         WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
         P+S(8)+LW+S(4)+S(160)+S(4), y+S(72), S(120), EH, hwnd, (HMENU)IDC_STATIC_FALLBACK_HINT, hInst, NULL);
-
-    /* 行4 y+98：输出目录（弹性宽） */
-    {
-        const int bw2 = S(56), gap = S(4);
-        const int ew = iw - LW - gap - bw2 - gap;
-        *hStaticOutLabel = CreateWindowW(L"STATIC", L"输出目录:",
-            WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
-            P+S(8), y+S(98), LW, EH, hwnd, NULL, hInst, NULL);
-        *hOutDir = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,
-            P+S(8)+LW+gap, y+S(98), ew, EH, hwnd, (HMENU)IDC_EDIT_OUTDIR, hInst, NULL);
-        CreateWindowW(L"BUTTON", L"浏览...",
-            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-            P+S(8)+LW+gap+ew+gap, y+S(98), bw2, EH, hwnd, (HMENU)IDC_BTN_BROWSE, hInst, NULL);
-    }
 }
 
 /* 日志 GroupBox + 底部按钮 */
@@ -438,19 +424,6 @@ static void on_btn_adddir(HWND hwnd, HWND hListBox) {
     }
 }
 
-static void on_btn_browse(HWND hwnd, HWND hOutDir) {
-    BROWSEINFOW bi = {0};
-    bi.hwndOwner = hwnd;
-    bi.lpszTitle = L"选择输出目录";
-    bi.ulFlags   = BIF_RETURNONLYFSDIRS|BIF_USENEWUI;
-    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-    if (pidl) {
-        wchar_t path[MAX_PATH_LEN];
-        if (SHGetPathFromIDListW(pidl, path))
-            SetWindowTextW(hOutDir, path);
-        CoTaskMemFree(pidl);
-    }
-}
 
 static void on_btn_decrypt(HWND hwnd,
                             HWND hProcEdit,
@@ -470,11 +443,8 @@ static void on_btn_decrypt(HWND hwnd,
     wcsncpy(fallback_buf, g_fallback_proc, MAX_PATH_LEN-1);
     fallback_buf[MAX_PATH_LEN-1] = 0;
     if (!fallback_buf[0]) wcscpy(fallback_buf, L"POWERPNT.EXE");
-    wchar_t out_buf[MAX_PATH_LEN] = {0};
-    GetWindowTextW(g_hwndOutDir, out_buf, MAX_PATH_LEN);
-    if (out_buf[0]) CreateDirectoryW(out_buf, NULL);
 
-     *is_decrypting = TRUE;
+    *is_decrypting = TRUE;
      EnableWindow(hBtnDecrypt, FALSE);
      EnableWindow(hBtnAddFile, FALSE);
      EnableWindow(hBtnAddDir,  FALSE);
@@ -493,7 +463,6 @@ static void on_btn_decrypt(HWND hwnd,
     HANDLE ht = start_decrypt_thread(hwnd, g_paths, g_path_cnt,
                          proc_buf[0] ? proc_buf : NULL,
                          fallback_buf,
-                         out_buf[0] ? out_buf : NULL,
                          NULL);
     if (ht) CloseHandle(ht);
     else {
@@ -514,7 +483,6 @@ static void layout_main_window(HWND hwnd, int cw, int ch,
                                 HWND hGbFiles, HWND hBtnAddFile, HWND hBtnAddDir,
                                 HWND hGbCfg,
                                 HWND hStaticProc,
-                                HWND hStaticOutLabel,
                                 HWND hGbLog) {
     const int P      = S(LAYOUT_P);
     const int BH     = S(LAYOUT_BH);
@@ -559,16 +527,6 @@ static void layout_main_window(HWND hwnd, int cw, int ch,
         P+S(8)+LW+S(4),               y+S(72), S(160),EH, SWP_NOZORDER|SWP_NOACTIVATE);
     SetWindowPos(GetDlgItem(hwnd, IDC_STATIC_FALLBACK_HINT), NULL,
         P+S(8)+LW+S(4)+S(160)+S(4),  y+S(72), S(120),EH, SWP_NOZORDER|SWP_NOACTIVATE);
-    /* 行4：输出目录（弹性宽） */
-    {
-        const int bw2 = S(56), gap = S(4);
-        int ew = IW - LW - gap - bw2 - gap;
-        if (ew < S(60)) ew = S(60);
-        SetWindowPos(hStaticOutLabel, NULL, P+S(8),           y+S(98), LW,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
-        SetWindowPos(g_hwndOutDir,    NULL, P+S(8)+LW+gap,    y+S(98), ew,  EH, SWP_NOZORDER|SWP_NOACTIVATE);
-        SetWindowPos(GetDlgItem(hwnd, IDC_BTN_BROWSE), NULL,
-            P+S(8)+LW+gap+ew+gap, y+S(98), bw2, EH, SWP_NOZORDER|SWP_NOACTIVATE);
-    }
 
     /* 日志 GroupBox（填满剩余） */
     y += CFG_H + S(4);
@@ -597,7 +555,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     static HWND hGbFiles=NULL, hGbCfg=NULL, hGbLog=NULL;
     static HWND hBtnAddFile=NULL, hBtnAddDir=NULL;
     static HWND hBtnDecrypt=NULL;
-    static HWND hStaticProc=NULL, hStaticOutLabel=NULL;
+    static HWND hStaticProc=NULL;
     static BOOL is_decrypting = FALSE;
 
     switch (msg) {
@@ -614,12 +572,12 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                           &hGbFiles, &hBtnAddFile, &hBtnAddDir, &hListBox);
 
         /* 配置区 */
-        HWND hProcEdit=NULL, hOutDir=NULL;
+        HWND hProcEdit=NULL;
         y += S(200);
         create_config_group(hwnd, hInst, y, GW, IW,
                             &hGbCfg,
                             &hProcEdit, &hStaticProc,
-                            &hStaticOutLabel, &hOutDir);
+                            NULL);
 
         /* 日志区 + 底部按钮 */
         y += S(96);
@@ -633,7 +591,6 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_hwndLog      = hLog;
         g_hwndProgress = hProg;
         g_hwndProcEdit = hProcEdit;
-        g_hwndOutDir   = hOutDir;
         g_hwndBtnDecrypt = hBtnDecrypt;
         g_hwndList     = hListBox;
 
@@ -733,7 +690,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         layout_main_window(hwnd, LOWORD(lp), HIWORD(lp),
                            hGbFiles, hBtnAddFile, hBtnAddDir,
                            hGbCfg,
-                           hStaticProc, hStaticOutLabel,
+                           hStaticProc,
                            hGbLog);
         return 0;
     }
@@ -748,8 +705,6 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (int i=0; i<g_path_cnt; i++) free(g_paths[i]);
             g_path_cnt = 0;
             SendMessageW(g_hwndList, LB_RESETCONTENT, 0, 0);
-        } else if (id == IDC_BTN_BROWSE) {
-            on_btn_browse(hwnd, g_hwndOutDir);
         } else if (id == IDC_EDIT_FALLBACK &&
                    HIWORD(wp) == EN_KILLFOCUS) {
             HWND hFb = GetDlgItem(hwnd, IDC_EDIT_FALLBACK);

@@ -21,8 +21,7 @@
 #define IDC_LOG                  109
 /* IDC_CHECK_AUTO 110 已废弃，预留不重用 */
 #define IDC_EDIT_PROC            111
-#define IDC_EDIT_OUTDIR          112
-#define IDC_BTN_BROWSE           113
+/* IDC_EDIT_OUTDIR 112 / IDC_BTN_BROWSE 113 已废弃（输出目录功能移除） */
 #define IDC_EDIT_FALLBACK        114
 #define IDC_BTN_EXT_MAP          115
 #define IDC_LIST_EXT_MAP         116
@@ -36,7 +35,6 @@ extern HWND g_hwndList;
 extern HWND g_hwndLog;
 extern HWND g_hwndProgress;
 extern HWND g_hwndProcEdit;
-extern HWND g_hwndOutDir;
 extern HWND g_hwndBtnDecrypt;
 
 /* 路径列表（gui.c 管理，decrypt 线程只读） */
