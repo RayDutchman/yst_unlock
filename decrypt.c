@@ -896,8 +896,12 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
                 snprintf(err, 512, "替换原文件失败 (%lu)", e);
                 ok = FALSE;
                 DeleteFileW(dst);
-            } else if (got_time) {
-                preserve_file_time(src, &ft_create, &ft_access, &ft_write);
+            } else {
+                if (got_time)
+                    preserve_file_time(src, &ft_create, &ft_access, &ft_write);
+                /* MoveFileExW 后驱动可能重新加密，再次检查确认 */
+                if (is_file_encrypted(src))
+                    ok = FALSE;
             }
         } else {
             DeleteFileW(dst);
