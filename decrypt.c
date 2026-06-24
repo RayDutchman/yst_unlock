@@ -743,7 +743,7 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
 
     WorkerEntry workers[MAX_WORKERS];
     int worker_cnt = 0;
-    int success_count = 0, fail_count = 0;
+    int success_count = 0, fail_count = 0, skip_count = 0;
 
     wchar_t fallback_exts[MAX_FALLBACK_EXTS][32];
     int fallback_ext_cnt = 0;
@@ -766,6 +766,7 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
          * 在安装了亿赛通的机器上实测验证：驱动对非白名单进程读文件
          * 不会透明解密，读到的仍是加密头，E-SafeNet 检测可靠。 */
         if (!is_file_encrypted(src)) {
+            skip_count++;
             NOTIFY_PROG(hwnd, (idx+1)*100/fl.count);
             continue;
         }
@@ -916,7 +917,8 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
     rmdir_recursive(tmp_dir);
     {
         wchar_t buf[256];
-        _snwprintf(buf, 255, L"\n完成：成功 %d 个，失败 %d 个", success_count, fail_count);
+        _snwprintf(buf, 255, L"\n完成：成功 %d 个，失败 %d 个，跳过 %d 个（未加密）",
+                   success_count, fail_count, skip_count);
         buf[255] = 0;
         NOTIFY_LOG(hwnd, buf);
     }
