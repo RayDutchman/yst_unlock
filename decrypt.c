@@ -516,9 +516,19 @@ void worker_mode(void) {
             sent += wr;
         }
         CloseHandle(hDst);
-        free(fbuf);
-        if (!write_ok) { DeleteFileW(dst_w); continue; }
+        if (!write_ok) { DeleteFileW(dst_w); free(fbuf); continue; }
 
+        /* 验证驱动是否真正透明解密：若读到的内容仍含加密魔数，说明驱动未解密 */
+        if (fbuf_len >= 4 &&
+            (unsigned char)fbuf[1] == 0x14 &&
+            (unsigned char)fbuf[2] == 0x23 &&
+            (unsigned char)fbuf[3] == 0x65) {
+            DeleteFileW(dst_w);
+            free(fbuf);
+            fputs("ERR:driver did not decrypt (still encrypted)\n", stdout);
+            fflush(stdout); continue;
+        }
+        free(fbuf);
         fputs("OK\n", stdout);
         fflush(stdout);
     }
