@@ -525,7 +525,7 @@ void worker_mode(void) {
             (unsigned char)fbuf[3] == 0x65) {
             DeleteFileW(dst_w);
             free(fbuf);
-            fputs("ERR:driver did not decrypt (still encrypted)\n", stdout);
+            fputs("ERR:驱动未解密\n", stdout);
             fflush(stdout); continue;
         }
         free(fbuf);
@@ -912,10 +912,8 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
             buf[1023] = 0;
         } else {
             fail_count++;
-            wchar_t werr[512] = {0};
-            MultiByteToWideChar(CP_UTF8, 0, err, -1, werr, 512);
-            _snwprintf(buf, 1023, L"[%d/%d] 失败 [%s]: %s \u2014 %s",
-                       idx+1, total, proc_name, fname, werr);
+            _snwprintf(buf, 1023, L"[%d/%d] 失败 [%s]: %s",
+                       idx+1, total, proc_name, fname);
             buf[1023] = 0;
         }
         NOTIFY_LOG(hwnd, buf);
