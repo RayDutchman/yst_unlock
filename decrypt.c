@@ -631,10 +631,29 @@ static BOOL send_task(WorkerProc *wp,
     free(line);
     if (!pipe_ok) { strncpy(err_out, "write to worker pipe failed", err_len-1); return FALSE; }
 
-    /* 逐字节读响应直到 '\n'（避免分批读取时多响应粘连丢数据） */
+    /* 逐字节读响应直到 '\n'，带超时保护（30秒），同时检测 worker 进程存活 */
     char resp[512] = {0};
     int ri = 0;
+    ULONGLONG deadline = GetTickCount64() + 30000;
     while (ri < (int)sizeof(resp)-1) {
+        /* 先检查管道里是否有数据可读，避免 ReadFile 永久阻塞 */
+        DWORD avail = 0;
+        if (!PeekNamedPipe(wp->hStdout_R, NULL, 0, NULL, &avail, NULL)) {
+            strncpy(err_out, "worker pipe broken", err_len-1); return FALSE;
+        }
+        if (avail == 0) {
+            /* 无数据：检查超时 */
+            if (GetTickCount64() >= deadline) {
+                strncpy(err_out, "worker timeout (30s)", err_len-1); return FALSE;
+            }
+            /* 检查 worker 进程是否已死 */
+            if (wp->hProcess &&
+                WaitForSingleObject(wp->hProcess, 0) != WAIT_TIMEOUT) {
+                strncpy(err_out, "worker process died", err_len-1); return FALSE;
+            }
+            Sleep(10);
+            continue;
+        }
         char ch; DWORD rd;
         if (!ReadFile(wp->hStdout_R, &ch, 1, &rd, NULL) || rd == 0) {
             strncpy(err_out, "worker pipe closed unexpectedly", err_len-1); return FALSE;
@@ -667,8 +686,17 @@ typedef struct {
 } DecryptArgs;
 
 #define NOTIFY_LOG(hwnd, s)   do { wchar_t *_s = _wcsdup(s); if (!_s || !PostMessageW((hwnd), WM_WORKER_LOG, 0, (LPARAM)_s)) free(_s); } while(0)
-#define NOTIFY_PROG(hwnd, v)  PostMessageW((hwnd), WM_WORKER_PROG, (WPARAM)(int)(v), 0)
-#define NOTIFY_DONE(hwnd, ok) PostMessageW((hwnd), WM_WORKER_DONE, (WPARAM)(ok), 0)
+/* NOTIFY_DONE：队列满时重试，确保完成通知一定送达 */
+#define NOTIFY_DONE(hwnd, ok) do { \
+    while (!PostMessageW((hwnd), WM_WORKER_DONE, (WPARAM)(ok), 0)) Sleep(10); \
+} while(0)
+
+/* 只在进度值变化时才发消息，避免大量重复值塞满消息队列 */
+static void notify_prog(HWND hwnd, int v) {
+    static int last = -1;
+    if (v != last) { PostMessageW(hwnd, WM_WORKER_PROG, (WPARAM)v, 0); last = v; }
+}
+#define NOTIFY_PROG(hwnd, v) notify_prog((hwnd), (int)(v))
 
 #define MAX_WORKERS 16
 typedef struct { wchar_t name[MAX_PATH_LEN]; WorkerProc wp; } WorkerEntry;
@@ -738,13 +766,6 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
          * 在安装了亿赛通的机器上实测验证：驱动对非白名单进程读文件
          * 不会透明解密，读到的仍是加密头，E-SafeNet 检测可靠。 */
         if (!is_file_encrypted(src)) {
-            const wchar_t *fname = wcsrchr(src, L'\\');
-            if (!fname) fname = src; else fname++;
-            wchar_t buf[1024];
-            _snwprintf(buf, 1023, L"[%d/%d] 跳过 [未加密]: %s",
-                       idx+1, fl.count, fname);
-            buf[1023] = 0;
-            NOTIFY_LOG(hwnd, buf);
             NOTIFY_PROG(hwnd, (idx+1)*100/fl.count);
             continue;
         }

@@ -752,9 +752,32 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EnableWindow(GetDlgItem(hwnd, IDC_BTN_CLEAR),   TRUE);
         EnableWindow(GetDlgItem(hwnd, IDC_BTN_EXT_MAP), TRUE);
         EnableWindow(g_hwndList, TRUE);
+        /* 清除消息队列中积压的 WM_WORKER_PROG 消息。
+         * 线程结束后队列里可能还有大量未处理的进度消息（比如跳过的文件），
+         * 若不清除，它们会在 DONE 之后被处理，把进度条改回非 100 的值。 */
+        {
+            MSG drain;
+            while (PeekMessageW(&drain, hwnd, WM_WORKER_PROG, WM_WORKER_PROG, PM_REMOVE))
+                ; /* 直接丢弃 */
+        }
+        /* 解密完成：进度条立即跑满。
+         * Vista+ 的 PBS_SMOOTH 往前滑动会有动画。
+         * 技巧：临时扩大 range 再收回，强制 position 被截断到 100，瞬间满格。 */
+        if (hProg) {
+            SendMessageW(hProg, PBM_SETRANGE, 0, MAKELPARAM(0, 102));
+            SendMessageW(hProg, PBM_SETPOS,   102, 0);
+            SendMessageW(hProg, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+        }
         return 0;
 
     case WM_CLOSE:
+        /* 在判断 is_decrypting 前，先把队列里待处理的 WM_WORKER_DONE 消费掉，
+         * 避免线程刚完成但消息还在队列时误判"正在进行中"。 */
+        {
+            MSG pending;
+            while (PeekMessageW(&pending, hwnd, WM_WORKER_DONE, WM_WORKER_DONE, PM_REMOVE))
+                SendMessageW(hwnd, pending.message, pending.wParam, pending.lParam);
+        }
         if (is_decrypting) {
             int r = MessageBoxW(hwnd, L"解密正在进行中，确定要退出吗？\n退出后当前批次将中断。",
                                 L"确认退出", MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2);
