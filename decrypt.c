@@ -860,18 +860,49 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
             }
         }
 
+        /* 多点文件名（如 .step.CATPart）可能让驱动按中间扩展名分类
+         * 而非最终扩展名，导致 worker 以错误进程身份读取失败。
+         * 把源文件重命名为纯扩展名临时路径（如 a1b2c3d.CATPart）
+         * 可绕过驱动的文件名模式匹配。 */
+        const wchar_t *bs = wcsrchr(src, L'\\');
+        const wchar_t *base = bs ? bs + 1 : src;
+        int dot_cnt = 0;
+        for (const wchar_t *p = base; *p; p++)
+            if (*p == L'.') dot_cnt++;
+        const wchar_t *last_ext = wcsrchr(src, L'.');
+        BOOL use_rename = (dot_cnt > 1 && last_ext);
+
+        char err[512] = {0};
+        wchar_t temp_src[MAX_PATH_LEN];
+        const wchar_t *src_for_worker = src;
+        BOOL ok = FALSE;
+
+        if (use_rename) {
+            int dir_len = bs ? (int)(bs - src + 1) : 0;
+            _snwprintf(temp_src, MAX_PATH_LEN-1, L"%.*s%07x%s",
+                       dir_len, src,
+                       (UINT)(GetTickCount() ^ (idx * 1103515245U)), last_ext);
+            temp_src[MAX_PATH_LEN-1] = 0;
+            if (!MoveFileW(src, temp_src)) {
+                snprintf(err, 511, "重命名失败 (%lu)",
+                         (unsigned long)GetLastError());
+                err[511] = 0;
+                goto log_result;
+            }
+            src_for_worker = temp_src;
+        }
+
         /* 确定临时文件路径（始终原位解密：写 .yst_tmp → 替换原文件） */
         wchar_t dst[MAX_PATH_LEN];
-        _snwprintf(dst, MAX_PATH_LEN-1, L"%s.yst_tmp", src);
+        _snwprintf(dst, MAX_PATH_LEN-1, L"%s.yst_tmp", src_for_worker);
         dst[MAX_PATH_LEN-1] = 0;
 
         /* 发送任务 */
-        char err[512] = {0};
-        BOOL ok = we ? send_task(&we->wp, src, dst, err, 512) : FALSE;
+        ok = we ? send_task(&we->wp, src_for_worker, dst, err, 512) : FALSE;
 
         if (ok) {
             /* 保留原文件时间戳 */
-            HANDLE hTimeSrc = CreateFileW(src, FILE_READ_ATTRIBUTES,
+            HANDLE hTimeSrc = CreateFileW(src_for_worker, FILE_READ_ATTRIBUTES,
                                           FILE_SHARE_READ, NULL, OPEN_EXISTING,
                                           FILE_FLAG_BACKUP_SEMANTICS, NULL);
             FILETIME ft_create, ft_access, ft_write;
@@ -882,8 +913,9 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
             /* 只读文件无法直接替换，先清除只读属性 */
             SetFileAttributesW(src, FILE_ATTRIBUTE_NORMAL);
             if (!MoveFileExW(dst, src, MOVEFILE_REPLACE_EXISTING)) {
-                DWORD e = GetLastError();
-                snprintf(err, 512, "替换原文件失败 (%lu)", e);
+                snprintf(err, 511, "替换失败 (%lu)",
+                         (unsigned long)GetLastError());
+                err[511] = 0;
                 ok = FALSE;
                 DeleteFileW(dst);
             } else {
@@ -897,6 +929,13 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
             DeleteFileW(dst);
         }
 
+        /* 清理临时重命名：成功则删残档，失败则恢复原名 */
+        if (use_rename) {
+            if (ok) DeleteFileW(src_for_worker);
+            else    MoveFileW(src_for_worker, src);
+        }
+
+log_result:
         const wchar_t *fname = wcsrchr(src, L'\\');
         if (!fname) fname = src; else fname++;
         wchar_t buf[1024];
