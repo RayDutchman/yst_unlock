@@ -910,7 +910,9 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
                             GetFileTime(hTimeSrc, &ft_create, &ft_access, &ft_write);
             if (hTimeSrc != INVALID_HANDLE_VALUE) CloseHandle(hTimeSrc);
 
-            /* 只读文件无法直接替换，先清除只读属性 */
+            /* 只读文件无法直接替换，先清除只读属性。
+             * 注意：use_rename 时 src 已被重命名走，此处可能因路径不
+             * 存在而静默失败，对 MoveFileExW 无害（目标不存在则创建）。 */
             SetFileAttributesW(src, FILE_ATTRIBUTE_NORMAL);
             if (!MoveFileExW(dst, src, MOVEFILE_REPLACE_EXISTING)) {
                 snprintf(err, 511, "替换失败 (%lu)",
@@ -930,9 +932,13 @@ static DWORD WINAPI decrypt_thread(LPVOID param) {
         }
 
         /* 清理临时重命名：成功则删残档，失败则恢复原名 */
-        if (use_rename) {
-            if (ok) DeleteFileW(src_for_worker);
-            else    MoveFileW(src_for_worker, src);
+        if (use_rename && src_for_worker != src) {
+            if (ok) {
+                DeleteFileW(src_for_worker);
+            } else {
+                if (!MoveFileW(src_for_worker, src))
+                    NOTIFY_LOG(hwnd, L"[警告] 临时文件恢复原名失败");
+            }
         }
 
 log_result:
